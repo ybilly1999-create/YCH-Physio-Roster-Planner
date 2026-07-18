@@ -8,11 +8,26 @@ function todayStr() {
   const d = new Date();
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
+function asList(v) {
+  if (Array.isArray(v)) return v.filter(Boolean);
+  if (typeof v === 'string') return v.split(',').map(s => s.trim()).filter(Boolean);
+  return v ? [v] : [];
+}
 function getIpdList(row) {
-  const ipd = row?.IPD ?? row?.ipd ?? [];
-  if (Array.isArray(ipd)) return ipd;
-  if (typeof ipd === 'string') return ipd.split(',').map(s => s.trim()).filter(Boolean);
-  return [];
+  return asList(row?.IPD ?? row?.ipd);
+}
+function getOpdList(row) {
+  return asList(row?.OPD ?? row?.opd);
+}
+// SHS(1) and SHS(2) kept separate — never merged.
+function getShsList(row) {
+  const out = [];
+  const s1 = row?.shs1 ?? row?.SHS1;
+  const s2 = row?.shs2 ?? row?.SHS2;
+  if (s1) out.push({ abbr: s1, slot: 'SHS(1)' });
+  if (s2) out.push({ abbr: s2, slot: 'SHS(2)' });
+  if (!out.length) asList(row?.shs ?? row?.SHS).forEach((a, i) => out.push({ abbr: a, slot: `SHS(${i + 1})` }));
+  return out;
 }
 
 export default function Rollcall() {
@@ -56,36 +71,53 @@ export default function Rollcall() {
           return m?.Name || m?.name || abbr;
         };
 
+        const row = (calRes.rows || [])[0];
+        // Build the FULL on-duty list for attendance: IPD + OPD + SHS(1)/SHS(2).
+        const rowFor = (nameOrAbbr) => staffRows.find(s => (s.Abbrev || s.abbr) === nameOrAbbr || (s.Name || s.name) === nameOrAbbr);
+        const mkEntry = (nameOrAbbr, post) => {
+          const match = rowFor(nameOrAbbr);
+          return {
+            abbr: match?.Abbrev || match?.abbr || nameOrAbbr,
+            name: match?.Name || match?.name || nameOrAbbr,
+            post, status: 'present', substitute: '', type: '',
+          };
+        };
+        const rosterList = [
+          ...getIpdList(row).map(a => mkEntry(a, 'IPD')),
+          ...getOpdList(row).map(a => mkEntry(a, 'OPD')),
+          ...getShsList(row).map(x => mkEntry(x.abbr, x.slot)),
+        ];
+
+        // Workload: reload from saved record (backend returns it from CAL_<year>).
+        const savedWl = savedRes?.workload || null;
+        const wlState = savedWl ? {
+          icuhdu: savedWl.icuhdu ?? '', ortho: savedWl.ortho ?? '', neuro: savedWl.neuro ?? '',
+          ms: savedWl.ms ?? '', newcase: savedWl.newcase ?? '',
+        } : { icuhdu: '', ortho: '', neuro: '', ms: '', newcase: '' };
+        setWorkload(wlState);
+
         const saved = savedRes?.ok ? (savedRes.rows || []) : [];
         if (saved.length > 0) {
-          // RELOAD previously saved record (incl. who is helping the sick duty)
-          setAttendance(saved.map(r => ({
-            abbr: r.original,
-            name: nameOf(r.original),
-            post: r.post || 'IPD',
-            status: r.status || 'present',
-            substitute: r.substitute || '',
-            type: r.type || '',
-          })));
-          setConfirmedBy('');
-          setWorkload({ icuhdu: '', ortho: '', neuro: '', ms: '', newcase: '' });
-        } else {
-          const row = (calRes.rows || [])[0];
-          const ipdList = getIpdList(row);
-          const initialAttendance = ipdList.map(nameOrAbbr => {
-            const match = staffRows.find(s => (s.Abbrev || s.abbr) === nameOrAbbr || (s.Name || s.name) === nameOrAbbr);
-            return {
-              abbr: match?.Abbrev || match?.abbr || nameOrAbbr,
-              name: match?.Name || match?.name || nameOrAbbr,
-              post: 'IPD',
-              status: 'present',
-              substitute: '',
-            };
+          // RELOAD previously saved attendance (incl. who is helping the sick duty),
+          // merged with the on-duty roster so OPD/SHS still appear even if not yet saved.
+          const savedByAbbr = {};
+          saved.forEach(r => { savedByAbbr[r.original] = r; });
+          const merged = rosterList.map(e => {
+            const r = savedByAbbr[e.abbr];
+            if (!r) return e;
+            delete savedByAbbr[e.abbr];
+            return { ...e, post: r.post || e.post, status: r.status || 'present', substitute: r.substitute || '', type: r.type || '' };
           });
-          setAttendance(initialAttendance);
-          setWorkload({ icuhdu: '', ortho: '', neuro: '', ms: '', newcase: '' });
-          // Confirmed by defaults to the roster staff on duty that date
-          setConfirmedBy(ipdList.join(', '));
+          // any saved rows not in the roster list (e.g. manual adds)
+          Object.values(savedByAbbr).forEach(r => merged.push({
+            abbr: r.original, name: nameOf(r.original), post: r.post || 'IPD',
+            status: r.status || 'present', substitute: r.substitute || '', type: r.type || '',
+          }));
+          setAttendance(merged);
+          setConfirmedBy('');
+        } else {
+          setAttendance(rosterList);
+          setConfirmedBy(rosterList.map(e => e.abbr).join(', '));
         }
       } catch (e) {
         if (!cancelled) setError(e.message || '網絡錯誤 Network error');

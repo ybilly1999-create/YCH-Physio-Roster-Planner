@@ -1,13 +1,22 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../lib/auth';
-import { getMakeup, apiPost } from '../lib/api';
-import { Loader2, AlertTriangle, Star, RotateCcw } from 'lucide-react';
+import { getMakeup, getShsClTracker, apiPost } from '../lib/api';
+import { Loader2, AlertTriangle, Star, RotateCcw, CalendarClock } from 'lucide-react';
 
 const TABS = [
   { key: 'sick', tc: '病假', en: 'Sick' },
   { key: 'typhoon', tc: '颱風', en: 'Typhoon' },
   { key: 'exwx', tc: '惡劣天氣', en: 'Extreme Wx' },
+  { key: 'cl', tc: 'CL 補假追蹤', en: 'CL Tracker' },
 ];
+
+function clStatusCls(s) {
+  const v = String(s || '').toUpperCase();
+  if (v.includes('LATE')) return 'bg-pink-100 text-pink-700';
+  if (v.includes('OK')) return 'bg-green-100 text-green-700';
+  if (v.includes('PENDING')) return 'bg-amber-100 text-amber-700';
+  return 'bg-slate-100 text-slate-600';
+}
 
 function pad(n) { return String(n).padStart(2, '0'); }
 function todayStr() {
@@ -22,6 +31,7 @@ export default function Makeup() {
   const [error, setError] = useState(null);
   const [rows, setRows] = useState([]);
   const [off, setOff] = useState([]); // staff NOT on this list
+  const [clData, setClData] = useState({ shs: [], cl: [] }); // CL tracker
   const [dialog, setDialog] = useState(null); // {abbr, name}
   const [backDate, setBackDate] = useState(todayStr());
   const [busy, setBusy] = useState(false);
@@ -34,9 +44,15 @@ export default function Makeup() {
     setError(null);
     setMsg(null);
     try {
-      const res = await getMakeup(type);
-      if (!res?.ok) { setError('無法載入名單 Failed to load makeup list'); setRows([]); setOff([]); }
-      else { setRows(res.rows || []); setOff(res.off || []); }
+      if (type === 'cl') {
+        const res = await getShsClTracker();
+        if (!res?.ok) { setError('無法載入 CL 追蹤 Failed to load CL tracker'); setClData({ shs: [], cl: [] }); }
+        else { setClData({ shs: res.shs || [], cl: res.cl || [] }); }
+      } else {
+        const res = await getMakeup(type);
+        if (!res?.ok) { setError('無法載入名單 Failed to load makeup list'); setRows([]); setOff([]); }
+        else { setRows(res.rows || []); setOff(res.off || []); }
+      }
     } catch (e) {
       setError(e.message || '網絡錯誤 Network error');
     } finally {
@@ -107,7 +123,73 @@ export default function Makeup() {
         </div>
       )}
 
-      {!loading && !error && (
+      {!loading && !error && tab === 'cl' && (
+        <>
+          {/* CL Tracker — ALL compensated-leave rows (fixes "only shows 2026-01-01") */}
+          <div className="card p-2 overflow-x-auto" data-testid="card-cl-tracker">
+            <div className="px-2 pt-1 pb-2 text-sm font-bold text-navy flex items-center gap-2">
+              <CalendarClock size={15} /> PH / RD / SH 補假追蹤 Compensated Leave ({clData.cl.length})
+            </div>
+            {clData.cl.length === 0 ? (
+              <p className="p-4 text-center text-muted text-sm" data-testid="cl-empty">暫無 CL 記錄 No CL records.</p>
+            ) : (
+            <table className="w-full text-sm min-w-[620px]" data-testid="table-cl">
+              <thead>
+                <tr className="text-left text-xs text-muted border-b border-border">
+                  <th className="p-2">值勤日 Duty Date</th>
+                  <th className="p-2">類型 Type</th>
+                  <th className="p-2">員工 Staff</th>
+                  <th className="p-2">CL 已取日 CL Date</th>
+                  <th className="p-2">截止日 Deadline</th>
+                  <th className="p-2">狀態 Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {clData.cl.map((r, idx) => (
+                  <tr key={idx} className="border-b border-border last:border-0" data-testid={`row-cl-${idx}`}>
+                    <td className="p-2 text-text">{r.date || '—'}</td>
+                    <td className="p-2">{r.type || '—'}</td>
+                    <td className="p-2 font-medium text-text">{r.staff || '—'}</td>
+                    <td className="p-2">{r.clDate || <span className="text-muted">未取 pending</span>}</td>
+                    <td className="p-2">{r.deadline || '—'}</td>
+                    <td className="p-2"><span className={`text-xs px-2 py-0.5 rounded font-semibold ${clStatusCls(r.status)}`}>{r.status || '—'}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            )}
+          </div>
+
+          {/* SHS draw list (paid) */}
+          <div className="card p-2 overflow-x-auto" data-testid="card-shs-draw">
+            <div className="px-2 pt-1 pb-2 text-sm font-bold text-muted">SHS 值勤 (有薪) SHS Duties ({clData.shs.length})</div>
+            {clData.shs.length === 0 ? (
+              <p className="p-4 text-center text-muted text-sm" data-testid="shs-draw-empty">暫無 SHS 記錄 No SHS records.</p>
+            ) : (
+            <table className="w-full text-sm min-w-[360px]" data-testid="table-shs-draw">
+              <thead>
+                <tr className="text-left text-xs text-muted border-b border-border">
+                  <th className="p-2">日期 Date</th>
+                  <th className="p-2">類型 Type</th>
+                  <th className="p-2">SHS 員工 Staff</th>
+                </tr>
+              </thead>
+              <tbody>
+                {clData.shs.map((r, idx) => (
+                  <tr key={idx} className="border-b border-border last:border-0" data-testid={`row-shs-draw-${idx}`}>
+                    <td className="p-2 text-text">{r.date || '—'}</td>
+                    <td className="p-2">{r.type || '—'}</td>
+                    <td className="p-2 font-medium text-text">{r.staff || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            )}
+          </div>
+        </>
+      )}
+
+      {!loading && !error && tab !== 'cl' && (
         <>
           {/* TOP table — staff ON the list */}
           <div className="card p-2 overflow-x-auto" data-testid="card-onlist">

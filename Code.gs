@@ -29,7 +29,10 @@ var C = {
 var CAL_PREFIX = 'CAL_';
 var CAL_HR = 7, CAL_FIRST = 8;
 // CAL columns: B date .. W status X failreason
-var CC = { date:2, weekday:3, type:4, ipd1:5, ipd6:10, opd:11, status:24, fail:25 };
+// CAL columns: workload now lives IN the calendar (L-Q) so everything for a year is one sheet.
+var CC = { date:2, weekday:3, type:4, ipd1:5, ipd6:10, opd:11,
+           icu:12, ort:13, neu:14, others:15, newcase:16, total:17,
+           shs1:18, shs2:19, status:24, fail:25 };
 var LOG = 'Change_Log';
 var HOL = 'Holidays';
 var WL  = 'Workload';
@@ -42,6 +45,12 @@ var MK = { // make-up sheets + their Staff_Master round/order columns
 // HISTORY block (auto-written by roll-call / record-back): col O=15 Date, P=16 Abbrev, Q=17 Name
 var MK_HIST_FIRST = 6, MK_HIST_DATE = 15, MK_HIST_ABBR = 16, MK_HIST_NAME = 17;
 var TEAM = 'Team_List';
+var SHSCL = 'SHS_CL_Tracker';
+// SHS_CL_Tracker layout (1-based): LEFT block (SHS draw) B Date | C Type | D SHS Staff;
+// RIGHT block (PH/RD/SH compensated-leave) I Date | J Type | K Staff | L CL Date | M CL Deadline | N CL Status.
+var SHSCL_FIRST = 3;
+var SHSCL_L = { date:2, type:3, staff:4 };
+var SHSCL_R = { date:9, type:10, staff:11, cldate:12, deadline:13, status:14 };
 // Duty_Record columns (1-based): B date C post D original E status F substitute G type H confirmed I timestamp
 var DRC = { date:2, post:3, orig:4, status:5, sub:6, type:7, confirmed:8, ts:9 };
 var DR_FIRST = 6;
@@ -66,9 +75,23 @@ function _lock(fn){
   lock.waitLock(25000);
   try { return fn(); } finally { lock.releaseLock(); }
 }
+// Change_Log layout (1-based): B Timestamp | C User | D swap-phase pointer (row 2 only) |
+// E Date affected | F From | G To | H Notes.  Entries are appended from row LOG_FIRST down,
+// writing ONLY B/C/E/H so the D pointer and F/G stay intact.
+var LOG_FIRST = 4;   // first data row (header is row 3)
+var LGC = { ts:2, user:3, date:5, from:6, to:7, notes:8 };
 function _log(action, detail, who){
   var sh=_sh(LOG); if(!sh) return;
-  sh.appendRow([_now(), who||'', action||'', detail||'']);
+  // find first empty row at/below LOG_FIRST by scanning the Timestamp column
+  var last=Math.max(sh.getLastRow(), LOG_FIRST-1);
+  var r=LOG_FIRST;
+  for(; r<=last; r++){ if(!sh.getRange(r, LGC.ts).getValue()) break; }
+  sh.getRange(r, LGC.ts).setValue(_now());
+  sh.getRange(r, LGC.user).setValue(who||'');
+  // parse a leading yyyy-MM-dd out of detail into the "Date affected" column when present
+  var dm=String(detail||'').match(/\d{4}-\d{2}-\d{2}/);
+  if(dm) sh.getRange(r, LGC.date).setValue(dm[0]);
+  sh.getRange(r, LGC.notes).setValue((action||'')+(detail?(': '+detail):''));
 }
 
 // ---------------------------------------------------------------- doGet (reads)
@@ -83,8 +106,10 @@ function doGet(e){
       case 'getCalendar':  return _out({ok:true, rows:getCalendar(e.parameter.year, e.parameter.from, e.parameter.to)});
       case 'getMakeup':    return _out({ok:true, rows:getMakeup(e.parameter.type), off:getMakeupOff(e.parameter.type)});
       case 'getTeam':      return _out({ok:true, rows:getTeam()});
-      case 'getRollcall':  return _out({ok:true, rows:getRollcall(e.parameter.date)});
-      case 'getWorkload':  return _out({ok:true, rows:readTable(WL)});
+      case 'getRollcall':  return _out({ok:true, rows:getRollcall(e.parameter.date), workload:getRollcallWorkload(e.parameter.date)});
+      case 'getShsClTracker': var _t=getShsClTracker(); return _out({ok:true, shs:_t.shs, cl:_t.cl});
+      // Workload now lives inside the CAL_<year> sheet (single source of truth).
+      case 'getWorkload':  return _out({ok:true, workload:getRollcallWorkload(e.parameter.date)});
       default:             return _out({ok:false, error:'unknown action '+a});
     }
   } catch(err){ return _out({ok:false, error:String(err)}); }
@@ -142,7 +167,7 @@ function getMeta(){
     var m=s.getName().match(/^CAL_(\d{4})$/); if(m) years.push(Number(m[1]));
   });
   years.sort();
-  return {ok:true, name:'YCH Physio Dept Roster Management System', version:'r2-2026-07-18', years:years,
+  return {ok:true, name:'YCH Physio Dept Roster Management System', version:'r3-2026-07-18', years:years,
           tz:Session.getScriptTimeZone(), serverTime:_now()};
 }
 function getStaff(){
@@ -158,7 +183,13 @@ function getStaff(){
       ty:{active:r[C.ty_active-1], round:r[C.ty_round-1], order:r[C.ty_order-1]},
       ew:{active:r[C.ew_active-1], round:r[C.ew_round-1], order:r[C.ew_order-1]},
       sk:{active:r[C.sk_active-1], round:r[C.sk_round-1], order:r[C.sk_order-1]},
-      active:r[C.active-1], leave_start:r[C.leave_start-1], leave_end:r[C.leave_end-1]
+      active:r[C.active-1], leave_start:r[C.leave_start-1], leave_end:r[C.leave_end-1],
+      // Capability flags (Y/N) derived from order numbers so the UI can show them.
+      cap_ph:(Number(r[C.ph_order-1])>0)?'Y':'N',
+      cap_shs:(Number(r[C.shs_order-1])>0)?'Y':'N',
+      cap_ty:(Number(r[C.ty_order-1])>0 && String(r[C.ty_active-1]||'').toUpperCase()!=='N')?'Y':'N',
+      cap_ew:(Number(r[C.ew_order-1])>0 && String(r[C.ew_active-1]||'').toUpperCase()!=='N')?'Y':'N',
+      cap_sk:(Number(r[C.sk_order-1])>0)?'Y':'N'
     });
   });
   return rows;
@@ -201,7 +232,12 @@ function getCalendar(year, from, to){
       date:ds, weekday:r[CC.weekday-1], type:r[CC.type-1],
       ipd:[r[4],r[5],r[6],r[7],r[8],r[9]].filter(function(x){return x;}),
       opd:r[CC.opd-1],
-      shs:[r[17],r[18]].filter(function(x){return x;}),
+      // SHS kept as TWO separate values (never merged into one cell)
+      shs1:r[CC.shs1-1]||'', shs2:r[CC.shs2-1]||'',
+      shs:[r[CC.shs1-1],r[CC.shs2-1]].filter(function(x){return x;}),
+      // Workload read straight from the calendar row (single source of truth)
+      workload:{ icuhdu:r[CC.icu-1], ortho:r[CC.ort-1], neuro:r[CC.neu-1],
+                 ms:r[CC.others-1], newcase:r[CC.newcase-1], total:r[CC.total-1] },
       status:r[CC.status-1], fail:r[CC.fail-1],
       confirmed: dr?dr.confirmed:false,
       sick: dr?dr.sick:[],
@@ -230,25 +266,33 @@ function _dutyRecordByDate(){
   });
   return map;
 }
+// CAPABILITY RULE: a staff is capable for a make-up list only when they have a
+// VALID ORDER NUMBER (> 0). "No order number = non-capable" (user rule). The
+// Active/Y-N flag is honoured too: an explicit 'N' excludes even if an order exists.
+function _isCapable(g){
+  var ord=Number(g.order);
+  if(!(ord>0)) return false;               // blank / 0 order = not capable
+  var act=String(g.active||'').trim().toUpperCase();
+  if(act==='N') return false;              // explicit N = not capable
+  return true;                             // Y or blank-but-has-order = capable
+}
 function getMakeup(type){
   var m=MK[type]; if(!m) return [];
-  var staff=getStaff().filter(function(s){
-    var g = type==='sick'?s.sk : type==='typhoon'?s.ty : s.ew;
-    return g.active==='Y';
-  });
+  var staff=getStaff();
   staff.forEach(function(s){ s.g = type==='sick'?s.sk : type==='typhoon'?s.ty : s.ew; });
-  staff.sort(function(a,b){ return (Number(a.g.round)-Number(b.g.round))||(Number(a.g.order)-Number(b.g.order)); });
-  return staff.map(function(s,i){
-    return {pos:i+1, abbr:s.abbr, name:s.name, round:Number(s.g.round)||1, order:Number(s.g.order)||0};
+  var on=staff.filter(function(s){ return _isCapable(s.g); });
+  on.sort(function(a,b){ return (Number(a.g.round)-Number(b.g.round))||(Number(a.g.order)-Number(b.g.order)); });
+  return on.map(function(s,i){
+    return {pos:i+1, abbr:s.abbr, name:s.name, round:Number(s.g.round)||1, order:Number(s.g.order)||0,
+            capable:'Y'};
   });
 }
-// Staff NOT on the given make-up list (active !== 'Y')
+// Staff NOT capable for the given make-up list (no order number, or capability = N)
 function getMakeupOff(type){
-  var staff=getStaff().filter(function(s){
-    var g = type==='sick'?s.sk : type==='typhoon'?s.ty : s.ew;
-    return g.active!=='Y';
-  });
-  return staff.map(function(s){ return {abbr:s.abbr, name:s.name}; });
+  var staff=getStaff();
+  staff.forEach(function(s){ s.g = type==='sick'?s.sk : type==='typhoon'?s.ty : s.ew; });
+  var off=staff.filter(function(s){ return !_isCapable(s.g); });
+  return off.map(function(s){ return {abbr:s.abbr, name:s.name, capable:'N'}; });
 }
 // Team_List (for Sat/Sun rotation + display)
 function getTeam(){
@@ -272,18 +316,61 @@ function getTeam(){
   return out;
 }
 function getRollcall(date){
-  var sh=_sh(DR); if(!sh) return [];
-  var last=sh.getLastRow(); if(last<DR_FIRST) return [];
-  var vals=sh.getRange(DR_FIRST,1,last-DR_FIRST+1, DRC.ts).getValues();
-  var tz=Session.getScriptTimeZone(); var out=[];
-  vals.forEach(function(r){
-    var d=r[DRC.date-1]; if(!d) return;
-    var ds=(d instanceof Date)?Utilities.formatDate(d,tz,'yyyy-MM-dd'):String(d);
-    if(ds!==date) return;
-    out.push({ date:ds, post:r[DRC.post-1], original:r[DRC.orig-1], status:r[DRC.status-1],
-               substitute:r[DRC.sub-1], type:r[DRC.type-1], confirmed:r[DRC.confirmed-1] });
-  });
+  var sh=_sh(DR); var out=[];
+  if(sh){
+    var last=sh.getLastRow();
+    if(last>=DR_FIRST){
+      var vals=sh.getRange(DR_FIRST,1,last-DR_FIRST+1, DRC.ts).getValues();
+      var tz=Session.getScriptTimeZone();
+      vals.forEach(function(r){
+        var d=r[DRC.date-1]; if(!d) return;
+        var ds=(d instanceof Date)?Utilities.formatDate(d,tz,'yyyy-MM-dd'):String(d);
+        if(ds!==date) return;
+        out.push({ date:ds, post:r[DRC.post-1], original:r[DRC.orig-1], status:r[DRC.status-1],
+                   substitute:r[DRC.sub-1], type:r[DRC.type-1], confirmed:r[DRC.confirmed-1] });
+      });
+    }
+  }
   return out;
+}
+// SHS_CL_Tracker — return ALL rows from both blocks (fixes "only shows 2026-01-01").
+function getShsClTracker(){
+  var sh=_sh(SHSCL); if(!sh) return {shs:[], cl:[]};
+  var last=sh.getLastRow(); if(last<SHSCL_FIRST) return {shs:[], cl:[]};
+  var tz=Session.getScriptTimeZone();
+  var vals=sh.getRange(SHSCL_FIRST,1,last-SHSCL_FIRST+1, SHSCL_R.status).getValues();
+  function ds(v){ return (v instanceof Date)?Utilities.formatDate(v,tz,'yyyy-MM-dd'):(v?String(v):''); }
+  var shs=[], cl=[];
+  vals.forEach(function(r){
+    // LEFT: SHS draw list
+    var ld=r[SHSCL_L.date-1], lstaff=r[SHSCL_L.staff-1];
+    if(ld || lstaff){ shs.push({ date:ds(ld), type:String(r[SHSCL_L.type-1]||''), staff:String(lstaff||'') }); }
+    // RIGHT: compensated-leave rows — include EVERY row that has a date or staff
+    var rd=r[SHSCL_R.date-1], rstaff=r[SHSCL_R.staff-1];
+    if(rd || rstaff){
+      cl.push({
+        date:ds(rd), type:String(r[SHSCL_R.type-1]||''), staff:String(rstaff||''),
+        clDate:ds(r[SHSCL_R.cldate-1]), deadline:ds(r[SHSCL_R.deadline-1]),
+        status:String(r[SHSCL_R.status-1]||'')
+      });
+    }
+  });
+  return {shs:shs, cl:cl};
+}
+// Workload for a given date, read from the CAL_<year> row (single source of truth).
+function getRollcallWorkload(date){
+  var year=Number(String(date).slice(0,4));
+  var info=_calStatusForDate(year, date);
+  if(!info || !info.row) return null;
+  var cal=_sh(CAL_PREFIX+year); var r=info.row;
+  return {
+    icuhdu:cal.getRange(r, CC.icu).getValue(),
+    ortho :cal.getRange(r, CC.ort).getValue(),
+    neuro :cal.getRange(r, CC.neu).getValue(),
+    ms    :cal.getRange(r, CC.others).getValue(),
+    newcase:cal.getRange(r, CC.newcase).getValue(),
+    total :cal.getRange(r, CC.total).getValue()
+  };
 }
 
 // ---------------------------------------------------------------- Staff_Master row lookup
@@ -428,13 +515,26 @@ function saveRollcall(body, role){
     }
   });
 
-  // 4) Workload (one row per date, upsert)
+  // 4) Workload — stored directly in the CAL_<year> row (cols L..P), NOT a separate
+  //    Workload sheet, so all data for a year lives in one sheet.
   if(wl){
-    var w=_sh(WL); var r=_wlRowForDate(date);
-    var vals=[date, num(wl.icuhdu), num(wl.ortho), num(wl.neuro), num(wl.ms), num(wl.newcase)];
-    w.getRange(r,2,1,6).setValues([vals]);
-    w.getRange(r,9).setValue(wl.by||role);
-    w.getRange(r,10).setValue(_now());
+    var year=Number(String(date).slice(0,4));
+    var info=_calStatusForDate(year, date);
+    if(info && info.row){
+      var cal=_sh(CAL_PREFIX+year), cr=info.row;
+      cal.getRange(cr, CC.icu).setValue(num(wl.icuhdu));
+      cal.getRange(cr, CC.ort).setValue(num(wl.ortho));
+      cal.getRange(cr, CC.neu).setValue(num(wl.neuro));
+      cal.getRange(cr, CC.others).setValue(num(wl.ms));
+      cal.getRange(cr, CC.newcase).setValue(num(wl.newcase));
+      // Total(New) col Q is a sheet formula; leave it to recalc. If it's blank, sum here.
+      var tot=cal.getRange(cr, CC.total).getFormula();
+      if(!tot){
+        var sum=[wl.icuhdu,wl.ortho,wl.neuro,wl.ms,wl.newcase]
+          .reduce(function(a,x){return a+(Number(x)||0);},0);
+        cal.getRange(cr, CC.total).setValue(sum);
+      }
+    }
   }
 
   // 5) mark calendar day confirmed (note) so colours refresh
@@ -468,18 +568,7 @@ function _markCalendarConfirmed(date){
   }
 }
 function num(x){ return (x===''||x===null||x===undefined)?'':Number(x); }
-function _wlRowForDate(date){
-  var w=_sh(WL); var last=Math.max(w.getLastRow(),6);
-  var col=w.getRange(6,2,last-5,1).getValues(); var tz=Session.getScriptTimeZone();
-  for(var i=0;i<col.length;i++){
-    var d=col[i][0]; if(!d) continue;
-    var ds=(d instanceof Date)?Utilities.formatDate(d,tz,'yyyy-MM-dd'):String(d);
-    if(ds===date) return 6+i;
-  }
-  // first empty
-  for(var j=0;j<col.length;j++) if(!col[j][0]) return 6+j;
-  return last+1;
-}
+// (Workload sheet removed — workload now stored in CAL_<year>. _wlRowForDate deleted.)
 
 // ---------------------------------------------------------------- randomizePH
 function randomizePH(body, role){
@@ -619,15 +708,19 @@ function generateRoster(body, role){
   var teams=['A','B','C','D'];
   // core members: sub == '1' or '2'
   var core={};   // core['A']['1'] = [abbr,...]
-  var satOnly={},sunOnly={}; // per team
-  teams.forEach(function(t){ core[t]={'1':[],'2':[]}; satOnly[t]=[]; sunOnly[t]=[]; });
+  var satOnly={},sunOnly={},opd={}; // per team
+  teams.forEach(function(t){ core[t]={'1':[],'2':[]}; satOnly[t]=[]; sunOnly[t]=[]; opd[t]=[]; });
   team.forEach(function(m){
     var t=m.team, sub=String(m.sub||'');
     if(!core[t]) return;
-    if(sub==='1'||sub==='2') core[t][sub].push(m.abbr);
+    if(/opd/i.test(sub)) opd[t].push(m.abbr);           // OPD grouping in Team_List
+    else if(sub==='1'||sub==='2') core[t][sub].push(m.abbr);
     else if(/sat/i.test(sub)) satOnly[t].push(m.abbr);
     else if(/sun/i.test(sub)) sunOnly[t].push(m.abbr);
   });
+  // Flat OPD rotation pool ordered by team A,B,C,D so Sat OPD cycles through teams.
+  var opdPool=[]; teams.forEach(function(t){ (opd[t]||[]).forEach(function(a){ if(activeMap[a]!==false) opdPool.push(a); }); });
+  var opdPtr=0;
   // rotation sequence of {team,sub}
   function rotationSeq(roundEven){
     var seq=[];
@@ -639,7 +732,8 @@ function generateRoster(body, role){
   }
 
   // ---- PH-order pool (for PH/SH/RD) ----
-  var phStaff=getStaff().filter(function(s){ return (s.tier==1||s.tier==2) && s.active==='Y'; });
+  // PH capability = active staff WITH a valid PH order number (>0). No order = not capable.
+  var phStaff=getStaff().filter(function(s){ return s.active==='Y' && (Number(s.ph_order)>0); });
   phStaff.sort(function(a,b){ return (Number(a.ph_order)||999)-(Number(b.ph_order)||999); });
   var phPool=phStaff.map(function(s){return s.abbr;}); var phPtr=0, phUsed={};
 
@@ -676,7 +770,13 @@ function generateRoster(body, role){
       }
       chosen=chosen.slice(0,need);
       _writeIpd(year, calRow, chosen);
-      var remark='Team '+t+' (sub-team '+sub+')'+(helpers.length?' + '+(isSat?'Sat-only':'Sun-only')+' '+helpers.join(','):'');
+      // ---- OPD staff on SAT: pick next from the A,B,C,D OPD rotation pool ----
+      var opdPick='';
+      if(isSat && opdPool.length){
+        opdPick=opdPool[opdPtr%opdPool.length]; opdPtr++;
+        sh.getRange(calRow, CC.opd).setValue(opdPick);
+      }
+      var remark='Team '+t+' (sub-team '+sub+')'+(helpers.length?' + '+(isSat?'Sat-only':'Sun-only')+' '+helpers.join(','):'')+(opdPick?' | OPD: '+opdPick:'');
       sh.getRange(calRow, CC.status).setNote(remark);
       var chkW=_calStatusForDate(year, ds);
       if(String(chkW.status).toUpperCase().indexOf('OK')<0){ needAdmin++; }

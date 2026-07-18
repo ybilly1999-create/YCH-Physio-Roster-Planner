@@ -42,4 +42,5 @@ export const getCalendar  = (year, from, to) => apiGet('getCalendar', { year, ..
 export const getMakeup    = (type) => apiGet('getMakeup', { type });
 export const getTeam      = () => apiGet('getTeam');
 export const getRollcall  = (date) => apiGet('getRollcall', { date });
+export const getShsClTracker = () => apiGet('getShsClTracker');
 export const getMeta      = () => apiGet('getMeta');

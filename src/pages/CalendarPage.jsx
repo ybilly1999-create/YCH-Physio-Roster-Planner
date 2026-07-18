@@ -32,11 +32,19 @@ function getOpdList(row) {
   if (typeof opd === 'string') return opd.split(',').map(s => s.trim()).filter(Boolean);
   return [];
 }
+// SHS(1) and SHS(2) are two SEPARATE slots — never merged into one cell.
+function getShsSlots(row) {
+  const s1 = row?.shs1 ?? row?.SHS1 ?? '';
+  const s2 = row?.shs2 ?? row?.SHS2 ?? '';
+  if (s1 || s2) return [{ slot: 'SHS(1)', abbr: s1 }, { slot: 'SHS(2)', abbr: s2 }];
+  // fallback: split legacy combined value
+  let arr = row?.SHS ?? row?.shs ?? [];
+  if (typeof arr === 'string') arr = arr.split(',').map(s => s.trim()).filter(Boolean);
+  if (!Array.isArray(arr)) arr = arr ? [arr] : [];
+  return [{ slot: 'SHS(1)', abbr: arr[0] || '' }, { slot: 'SHS(2)', abbr: arr[1] || '' }];
+}
 function getShsList(row) {
-  const shs = row?.SHS ?? row?.shs ?? [];
-  if (Array.isArray(shs)) return shs.filter(Boolean);
-  if (typeof shs === 'string') return shs.split(',').map(s => s.trim()).filter(Boolean);
-  return [];
+  return getShsSlots(row).map(x => x.abbr).filter(Boolean);
 }
 
 export default function CalendarPage() {
@@ -150,6 +158,15 @@ export default function CalendarPage() {
       if (row.confirmed) return 'confirmed';
     }
     return 'unconfirmed';
+  }
+
+  // Who is helping (substitute) a given sick staff member on the selected day.
+  function helperFor(abbrOrName, row) {
+    if (selectedRow && row === selectedRow && rollcall?.attendance) {
+      const att = rollcall.attendance.find(a => (a.abbr || a.Abbr) === abbrOrName || (a.name || a.Name) === abbrOrName);
+      if (att && att.substitute) return att.substitute;
+    }
+    return '';
   }
 
   async function handleForceOverride() {
@@ -370,9 +387,10 @@ export default function CalendarPage() {
                   <div className="flex flex-wrap gap-1">
                     {getIpdList(selectedRow).map((name, idx) => {
                       const state = staffState(name, selectedRow);
+                      const helper = state === 'sick' ? helperFor(name, selectedRow) : '';
                       return (
                         <span key={idx} className="text-xs px-2 py-0.5 rounded" style={{ background: COLORS[state].bg, color: COLORS[state].fg }} data-testid={`chip-ipd-${idx}`}>
-                          {name}
+                          {name}{helper ? <> → <b>{helper}</b> 代 sub</> : (state === 'sick' ? ' (病假 SL)' : '')}
                         </span>
                       );
                     })}
@@ -396,11 +414,14 @@ export default function CalendarPage() {
                 {getShsList(selectedRow).length > 0 && (
                   <div>
                     <div className="text-xs text-muted mb-1">SHS 特別半日更</div>
-                    <div className="flex flex-wrap gap-1">
-                      {getShsList(selectedRow).map((name, idx) => (
-                        <span key={idx} className="text-xs px-2 py-0.5 rounded font-semibold" style={{ background: COLORS.shs.bg, color: COLORS.shs.fg }} data-testid={`chip-shs-${idx}`}>
-                          {name}
-                        </span>
+                    <div className="grid grid-cols-2 gap-2">
+                      {getShsSlots(selectedRow).map((s, idx) => (
+                        <div key={idx}>
+                          <div className="text-[10px] text-muted mb-0.5">{s.slot}</div>
+                          {s.abbr
+                            ? <span className="text-xs px-2 py-0.5 rounded font-semibold" style={{ background: COLORS.shs.bg, color: COLORS.shs.fg }} data-testid={`chip-shs-${idx}`}>{s.abbr}</span>
+                            : <span className="text-xs text-muted">—</span>}
+                        </div>
                       ))}
                     </div>
                   </div>
