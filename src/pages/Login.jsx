@@ -8,14 +8,16 @@ export default function Login() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault();
     setError('');
     setBusy(true);
-    const result = login(token.trim());
+    const result = await login(token.trim());
     setBusy(false);
     if (!result) {
       setError('Token 錯誤 — Invalid token. 請重新輸入 Please try again.');
+    } else if (result.error) {
+      setError(result.error + '。請確認後端已部署。');
     }
   };
 
