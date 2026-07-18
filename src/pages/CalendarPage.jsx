@@ -137,10 +137,20 @@ export default function CalendarPage() {
   for (let i = 0; i < firstWeekday; i++) cells.push(null);
   for (let d = 1; d <= daysInMonth; d++) cells.push(d);
 
+  // Roll-call rows for the selected day: [{original, status, substitute, post, ...}]
+  function rcRows() {
+    return (rollcall && Array.isArray(rollcall.rows)) ? rollcall.rows : [];
+  }
+  function rcFind(abbrOrName) {
+    return rcRows().find(a =>
+      (a.original || a.abbr || a.Abbr) === abbrOrName ||
+      (a.name || a.Name) === abbrOrName);
+  }
+
   function staffState(abbrOrName, row) {
     // Prefer live roll-call detail when this day is the selected one.
-    if (selectedRow && row === selectedRow && rollcall?.attendance) {
-      const att = rollcall.attendance.find(a => (a.abbr || a.Abbr) === abbrOrName || (a.name || a.Name) === abbrOrName);
+    if (selectedRow && row === selectedRow) {
+      const att = rcFind(abbrOrName);
       if (att) {
         const status = (att.status || att.Status || '').toLowerCase();
         if (status === 'sick') return 'sick';
@@ -162,8 +172,8 @@ export default function CalendarPage() {
 
   // Who is helping (substitute) a given sick staff member on the selected day.
   function helperFor(abbrOrName, row) {
-    if (selectedRow && row === selectedRow && rollcall?.attendance) {
-      const att = rollcall.attendance.find(a => (a.abbr || a.Abbr) === abbrOrName || (a.name || a.Name) === abbrOrName);
+    if (selectedRow && row === selectedRow) {
+      const att = rcFind(abbrOrName);
       if (att && att.substitute) return att.substitute;
     }
     return '';

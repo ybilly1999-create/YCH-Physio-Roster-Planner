@@ -58,6 +58,20 @@ var DR_FIRST = 6;
 // ---------------------------------------------------------------- utils
 function _ss(){ return SpreadsheetApp.getActiveSpreadsheet(); }
 function _sh(n){ return _ss().getSheetByName(n); }
+
+// ---- Lightweight caching (CacheService) to speed up repeated reads ----
+// Staff_Master and Team_List change rarely; cache their parsed JSON for 6 hours.
+// Any write that changes those sheets calls _cacheBust() to clear stale entries.
+var _CACHE_TTL = 21600; // 6 hours (max allowed)
+function _cacheGet(key){
+  try{ var c=CacheService.getScriptCache().get(key); return c?JSON.parse(c):null; }catch(e){ return null; }
+}
+function _cachePut(key, obj){
+  try{ CacheService.getScriptCache().put(key, JSON.stringify(obj), _CACHE_TTL); }catch(e){}
+}
+function _cacheBust(){
+  try{ CacheService.getScriptCache().removeAll(['staff','team']); }catch(e){}
+}
 function _props(){ return PropertiesService.getScriptProperties(); }
 function _out(obj){
   return ContentService.createTextOutput(JSON.stringify(obj))
@@ -167,10 +181,11 @@ function getMeta(){
     var m=s.getName().match(/^CAL_(\d{4})$/); if(m) years.push(Number(m[1]));
   });
   years.sort();
-  return {ok:true, name:'YCH Physio Dept Roster Management System', version:'r3-2026-07-18', years:years,
+  return {ok:true, name:'YCH Physio Dept Roster Management System', version:'r4-2026-07-18', years:years,
           tz:Session.getScriptTimeZone(), serverTime:_now()};
 }
 function getStaff(){
+  var _c=_cacheGet('staff'); if(_c) return _c;
   var sh=_sh(SM);
   var last=SM_LAST, rows=[];
   var vals=sh.getRange(SM_FIRST,1,last-SM_FIRST+1, C.fair).getValues();
@@ -192,6 +207,7 @@ function getStaff(){
       cap_sk:(Number(r[C.sk_order-1])>0)?'Y':'N'
     });
   });
+  _cachePut('staff', rows);
   return rows;
 }
 function readTable(name){
@@ -296,6 +312,7 @@ function getMakeupOff(type){
 }
 // Team_List (for Sat/Sun rotation + display)
 function getTeam(){
+  var _ct=_cacheGet('team'); if(_ct) return _ct;
   var sh=_sh(TEAM); if(!sh) return [];
   var data=sh.getDataRange().getValues();
   var hr=-1;
@@ -313,6 +330,7 @@ function getTeam(){
     out.push({team:String(d[iTeam]).trim(), sub:String(d[iSub]).trim(), cat:String(d[iCat]).trim(),
               abbr:String(d[iAb]).trim(), name:String(d[iNm]).trim(), tier:d[iTier]});
   }
+  _cachePut('team', out);
   return out;
 }
 function getRollcall(date){
@@ -466,6 +484,7 @@ function recordBack(body, role){
   // write to history block of that make-up sheet
   _appendMakeupHistory(m.sheet, date, abbr, sh.getRange(row,C.name).getValue());
   _log('recordBack', type+' '+abbr+' '+date+' round '+cur+'->'+(cur+1), body.user||role);
+  _cacheBust();
   return {ok:true, newRound:cur+1};
 }
 function _appendMakeupHistory(sheetName, date, abbr, name){
@@ -624,6 +643,7 @@ function upsertStaff(body, role){
   });
   SpreadsheetApp.flush();
   _log('upsertStaff', abbr+(isNew?' (new)':' (edit)'), body.user||role);
+  _cacheBust();
   return {ok:true, row:row, isNew:isNew};
 }
 function _countStaff(){
@@ -643,6 +663,7 @@ function setActive(body, role){
   var row=_findStaffRow(body.abbr); if(row<0) return {ok:false,error:'not found'};
   _sh(SM).getRange(row, C.active).setValue(body.active?'Y':'N');
   _log('setActive', body.abbr+'='+ (body.active?'Y':'N'), body.user||role);
+  _cacheBust();
   return {ok:true};
 }
 
@@ -662,27 +683,83 @@ function rebuildOrders(body, role){
     });
   });
   _log('rebuildOrders','', body.user||role);
+  _cacheBust();
   return {ok:true};
 }
 
 // ---------------------------------------------------------------- generateCalendar (create CAL_<year> shell)
+// Read Holidays sheet into a map { 'yyyy-MM-dd' : 'PH'|'SH'|'RD' } for the given year.
+// Holidays layout: B=Date, C=Type, D=Name.
+function _holidayMap(year){
+  var sh=_sh(HOL); var map={}; if(!sh) return map;
+  var tz=Session.getScriptTimeZone();
+  var data=sh.getDataRange().getValues();
+  for(var i=0;i<data.length;i++){
+    var d=data[i][1];                 // col B (index 1)
+    if(!(d instanceof Date)) continue;
+    if(d.getFullYear()!==year) continue;
+    var ds=Utilities.formatDate(d,tz,'yyyy-MM-dd');
+    var ty=String(data[i][2]||'').trim().toUpperCase();  // col C
+    if(!ty) continue;
+    // normalise to PH / SH / RD
+    if(ty.indexOf('PH')>=0) ty='PH';
+    else if(ty.indexOf('SH')>=0 || ty.indexOf('STAT')>=0) ty='SH';
+    else if(ty.indexOf('RD')>=0 || ty.indexOf('REST')>=0) ty='RD';
+    map[ds]=ty;
+  }
+  return map;
+}
+
+// Generate a BRAND-NEW empty calendar for `year`.
+// - Copies only the TEMPLATE (headers/formatting) from the newest existing CAL sheet,
+//   then CLEARS every data cell so NO staff/workload data is carried over.
+// - Sets Weekday + Type per day: Holidays (PH/SH/RD) take priority over Sat/Sun.
 function generateCalendar(body, role){
   var year=Number(body.year); if(!year) return {ok:false,error:'need year'};
   var name=CAL_PREFIX+year;
   if(_sh(name)) return {ok:false, error:name+' already exists'};
-  var tmpl=_sh(CAL_PREFIX+ (getMeta().years[0]||'2026'));
+  var tmpl=_sh(CAL_PREFIX+ (getMeta().years[getMeta().years.length-1]||'2026'));
   if(!tmpl) return {ok:false, error:'no template calendar'};
+
+  // Duplicate the template for headers/formatting, then wipe all DATA rows.
   var copy=tmpl.copyTo(_ss()); copy.setName(name);
-  // rewrite dates for the new year: fill B column Jan1..Dec31
+  var lastRow=copy.getLastRow();
+  if(lastRow>=CAL_FIRST){
+    // Clear every content cell in the data grid (date..fail) so nothing carries over.
+    copy.getRange(CAL_FIRST, CC.date, lastRow-CAL_FIRST+1, CC.fail-CC.date+1).clearContent();
+    // Also clear any leftover notes on the status column.
+    copy.getRange(CAL_FIRST, CC.status, lastRow-CAL_FIRST+1, 1).clearNote();
+  }
+
+  var tz=Session.getScriptTimeZone();
+  var wkNames=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  var hol=_holidayMap(year);
   var start=new Date(year,0,1), end=new Date(year,11,31);
   var days=Math.round((end-start)/86400000)+1;
+  var holCount=0;
+
+  // Build the day rows in memory then write once (fast, single setValues).
+  var out=[]; // [date, weekday, type]
   for(var d=0; d<days; d++){
     var dt=new Date(year,0,1+d);
-    copy.getRange(CAL_FIRST+d, CC.date).setValue(dt);
+    var ds=Utilities.formatDate(dt,tz,'yyyy-MM-dd');
+    var dow=dt.getDay(); // 0=Sun..6=Sat
+    var wk=wkNames[dow];
+    var type='';
+    // Priority: Holiday (PH/SH/RD) first, then Sat/Sun, else blank weekday.
+    if(hol[ds]){ type=hol[ds]; holCount++; }
+    else if(dow===6) type='Sat';
+    else if(dow===0) type='Sun';
+    out.push([dt, wk, type]);
   }
-  _log('generateCalendar', String(year), body.user||role);
+  // Write date (B), weekday (C), type (D) in one shot.
+  copy.getRange(CAL_FIRST, CC.date, out.length, 1).setValues(out.map(function(r){return [r[0]];}));
+  copy.getRange(CAL_FIRST, CC.weekday, out.length, 1).setValues(out.map(function(r){return [r[1]];}));
+  copy.getRange(CAL_FIRST, CC.type, out.length, 1).setValues(out.map(function(r){return [r[2]];}));
+
+  _log('generateCalendar', year+' (empty; holidays='+holCount+')', body.user||role);
   SpreadsheetApp.flush();
-  return {ok:true, sheet:name, days:days};
+  return {ok:true, sheet:name, days:days, holidays:holCount};
 }
 
 // ---------------------------------------------------------------- generateRoster
@@ -731,11 +808,51 @@ function generateRoster(body, role){
     return seq;
   }
 
-  // ---- PH-order pool (for PH/SH/RD) ----
+  // ---- PH-order pool (for PH/SH/RD) with skip-and-carry rule ----
   // PH capability = active staff WITH a valid PH order number (>0). No order = not capable.
-  var phStaff=getStaff().filter(function(s){ return s.active==='Y' && (Number(s.ph_order)>0); });
+  var allStaff=getStaff();
+  // Capability map: abbr -> {ort:bool, neuro:bool, tier:number, name, ph_round}
+  var capMap={};
+  allStaff.forEach(function(s){
+    capMap[s.abbr]={
+      ort:   String(s.ort||'').toUpperCase()==='Y',
+      neuro: String(s.neuro||'').toUpperCase()==='Y',
+      tier:  Number(s.tier)||2,
+      name:  s.name,
+      ph_round: Number(s.ph_round)||1
+    };
+  });
+  var phStaff=allStaff.filter(function(s){ return s.active==='Y' && (Number(s.ph_order)>0); });
   phStaff.sort(function(a,b){ return (Number(a.ph_order)||999)-(Number(b.ph_order)||999); });
-  var phPool=phStaff.map(function(s){return s.abbr;}); var phPtr=0, phUsed={};
+  var phPool=phStaff.map(function(s){return s.abbr;}); var phPtr=0;
+  // Round tracking: each staff has a current round; we only advance to the next round
+  // once EVERYONE in the pool has served the current round (prevents double duty).
+  var phRound={}; phPool.forEach(function(a){ phRound[a]=capMap[a]?capMap[a].ph_round:1; });
+  var phServedThisRound={};   // abbr -> true once used in the current round
+  var phRoundNo = phPool.length ? Math.min.apply(null, phPool.map(function(a){return phRound[a];})) : 1;
+
+  // Does adding `cand` to `chosen` keep us on track to satisfy the rule?
+  // Rule (matches STATUS formula): need >=2 Tier-1, >=1 ORT, >=1 NEURO in the final `need2` picks.
+  // We SKIP a candidate only if picking them would make it IMPOSSIBLE to still satisfy
+  // the remaining requirements with the seats left. Skipped staff are carried to next round.
+  function phCounts(list){
+    var t1=0,ort=0,neu=0;
+    list.forEach(function(a){ var c=capMap[a]; if(!c)return; if(c.tier===1)t1++; if(c.ort)ort++; if(c.neuro)neu++; });
+    return {t1:t1, ort:ort, neu:neu};
+  }
+  // Given current chosen + a candidate pool remaining, can we still finish valid?
+  function canStillSatisfy(chosen, remainingAbbrs, need){
+    var seatsLeft=need-chosen.length;
+    var cur=phCounts(chosen);
+    var needT1=Math.max(0,2-cur.t1), needOrt=Math.max(0,1-cur.ort), needNeu=Math.max(0,1-cur.neu);
+    if(seatsLeft<=0) return needT1===0&&needOrt===0&&needNeu===0;
+    // count how many remaining can fill each requirement
+    var remT1=0,remOrt=0,remNeu=0;
+    remainingAbbrs.forEach(function(a){ var c=capMap[a]; if(!c)return; if(c.tier===1)remT1++; if(c.ort)remOrt++; if(c.neuro)remNeu++; });
+    if(remT1<needT1||remOrt<needOrt||remNeu<needNeu) return false;
+    // rough seat feasibility: sum of distinct requirements must fit remaining seats
+    return (needT1+needOrt+needNeu)<=seatsLeft+2; // +2 slack: one staff may cover ORT+NEURO+T1
+  }
 
   // weekend rotation pointers
   var wkIdx=0;               // index into full rotation sequence (advances per weekend DAY)
@@ -785,24 +902,69 @@ function generateRoster(body, role){
     }
 
     if(['PH','RD','SH'].indexOf(type)>=0){
-      var need2=5, chosen2=[], tried=0;
-      while(chosen2.length<need2 && tried<phPool.length*2){
-        if(Object.keys(phUsed).length>=phPool.length) phUsed={};
-        var cand=phPool[phPtr%phPool.length]; phPtr++; tried++;
-        if(phUsed[cand]) continue;
-        chosen2.push(cand); phUsed[cand]=1;
+      var need2=5, chosen2=[], skippedToday=[];
+      // Candidates eligible THIS round = still on their current round (not yet served).
+      // We iterate in ph_order; skip a candidate if adding them would make the rule
+      // impossible to satisfy, OR to reserve a needed specialty for a later seat.
+      var guard=0, maxGuard=phPool.length*3;
+      while(chosen2.length<need2 && guard<maxGuard){
+        guard++;
+        // If everyone has served this round, advance the round for all.
+        var eligible=phPool.filter(function(a){ return !phServedThisRound[a] && chosen2.indexOf(a)<0; });
+        if(eligible.length===0){
+          // round complete -> bump round for everyone, reset served flags
+          phPool.forEach(function(a){ phRound[a]=(phRound[a]||1)+1; });
+          phRoundNo++; phServedThisRound={};
+          eligible=phPool.filter(function(a){ return chosen2.indexOf(a)<0; });
+          if(eligible.length===0) break;
+        }
+        // Walk eligible in order starting from phPtr.
+        var picked=null, startPtr=phPtr;
+        for(var scan=0; scan<eligible.length; scan++){
+          var cand=eligible[(startPtr+scan)%eligible.length];
+          var trial=chosen2.concat([cand]);
+          var remaining=eligible.filter(function(a){return a!==cand && trial.indexOf(a)<0;});
+          // Accept cand only if we can STILL finish the rule with the seats left.
+          if(canStillSatisfy(trial, remaining, need2)){ picked=cand; break; }
+          else { if(skippedToday.indexOf(cand)<0) skippedToday.push(cand); }
+        }
+        if(picked===null){
+          // No single pick keeps us feasible -> take next eligible anyway (best effort).
+          picked=eligible[startPtr%eligible.length];
+        }
+        chosen2.push(picked);
+        phServedThisRound[picked]=true;
+        // advance pointer to just after the picked staff's ph_order position
+        phPtr=(phPool.indexOf(picked)+1)%phPool.length;
       }
       _writeIpd(year, calRow, chosen2);
       var chk=_calStatusForDate(year, ds);
-      if(String(chk.status).toUpperCase().indexOf('OK')<0){ sh.getRange(calRow, CC.status).setNote('NEEDS ADMIN'); needAdmin++; }
+      var note='Round '+phRoundNo+(skippedToday.length?' | Skipped(carry): '+skippedToday.join(','):'');
+      if(String(chk.status).toUpperCase().indexOf('OK')<0){ note+=' | NEEDS ADMIN'; needAdmin++; }
       else filled++;
+      sh.getRange(calRow, CC.status).setNote(note);
       continue;
     }
     // normal weekdays: skip (manual)
   }
+
+  // ---- Persist updated PH rounds back to Staff_Master (task: record round on generate) ----
+  var roundsWritten=0;
+  if(phPool.length){
+    var smSh=_sh(SM);
+    var smVals=smSh.getRange(SM_FIRST,1,SM_LAST-SM_FIRST+1, C.ph_round).getValues();
+    for(var si=0; si<smVals.length; si++){
+      var ab=String(smVals[si][C.abbr-1]||'').trim();
+      if(ab && phRound[ab]!==undefined){
+        smSh.getRange(SM_FIRST+si, C.ph_round).setValue(phRound[ab]);
+        roundsWritten++;
+      }
+    }
+  }
   SpreadsheetApp.flush();
-  _log('generateRoster', year+' m'+fromM+'-'+toM+' filled='+filled+' sat='+satDone+' sun='+sunDone+' needAdmin='+needAdmin, body.user||role);
-  return {ok:true, filled:filled, sat:satDone, sun:sunDone, needAdmin:needAdmin};
+  _cacheBust(); // ph_round changed in Staff_Master
+  _log('generateRoster', year+' m'+fromM+'-'+toM+' filled='+filled+' sat='+satDone+' sun='+sunDone+' needAdmin='+needAdmin+' phRound->'+phRoundNo+' rounds='+roundsWritten, body.user||role);
+  return {ok:true, filled:filled, sat:satDone, sun:sunDone, needAdmin:needAdmin, phRound:phRoundNo, roundsWritten:roundsWritten};
 }
 
 // ---------------------------------------------------------------- Holidays
