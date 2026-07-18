@@ -130,8 +130,7 @@ export default function CalendarPage() {
   for (let d = 1; d <= daysInMonth; d++) cells.push(d);
 
   function staffState(abbrOrName, row) {
-    // Determine colour state for a chip. Without confirmed rollcall data we
-    // treat IPD staff as unconfirmed (grey) unless rollcall says otherwise.
+    // Prefer live roll-call detail when this day is the selected one.
     if (selectedRow && row === selectedRow && rollcall?.attendance) {
       const att = rollcall.attendance.find(a => (a.abbr || a.Abbr) === abbrOrName || (a.name || a.Name) === abbrOrName);
       if (att) {
@@ -140,6 +139,15 @@ export default function CalendarPage() {
         if (status === 'substitute' || att.substitute) return 'substitute';
         if (status === 'confirmed' || status === 'present') return 'confirmed';
       }
+    }
+    // Otherwise colour straight from the calendar row's Duty_Record summary
+    // (confirmed / sick / substitute) so the month grid is coloured too.
+    if (row) {
+      const sick = row.sick || [];
+      const subs = row.substitute || [];
+      if (sick.indexOf(abbrOrName) >= 0) return 'sick';
+      if (subs.indexOf(abbrOrName) >= 0) return 'substitute';
+      if (row.confirmed) return 'confirmed';
     }
     return 'unconfirmed';
   }
@@ -251,11 +259,14 @@ export default function CalendarPage() {
                     {badge.label && <span className={`text-[10px] px-1 rounded ${badge.cls}`}>{badge.label}</span>}
                   </div>
                   <div className="flex flex-wrap gap-0.5">
-                    {ipdList.slice(0, 6).map((name, idx) => (
-                      <span key={idx} className="text-[10px] px-1 rounded" style={{ background: COLORS.unconfirmed.bg, color: COLORS.unconfirmed.fg }}>
-                        {name}
-                      </span>
-                    ))}
+                    {ipdList.slice(0, 6).map((name, idx) => {
+                      const st = staffState(name, row);
+                      return (
+                        <span key={idx} className="text-[10px] px-1 rounded" style={{ background: COLORS[st].bg, color: COLORS[st].fg }}>
+                          {name}
+                        </span>
+                      );
+                    })}
                     {opdList.map((name, idx) => (
                       <span key={`opd-${idx}`} className="text-[10px] px-1 rounded" style={{ background: COLORS.opd.bg, color: COLORS.opd.fg }}>
                         {name} OPD
@@ -299,9 +310,12 @@ export default function CalendarPage() {
                   </div>
                   {badge.label && <span className={`text-[10px] px-1 rounded ${badge.cls}`}>{badge.label}</span>}
                   <div className="flex flex-wrap gap-0.5 flex-1 min-w-0">
-                    {ipdList.slice(0, 4).map((name, idx) => (
-                      <span key={idx} className="text-[10px] px-1 rounded" style={{ background: COLORS.unconfirmed.bg, color: COLORS.unconfirmed.fg }}>{name}</span>
-                    ))}
+                    {ipdList.slice(0, 4).map((name, idx) => {
+                      const st = staffState(name, row);
+                      return (
+                        <span key={idx} className="text-[10px] px-1 rounded" style={{ background: COLORS[st].bg, color: COLORS[st].fg }}>{name}</span>
+                      );
+                    })}
                     {opdList.map((name, idx) => (
                       <span key={`opd-${idx}`} className="text-[10px] px-1 rounded" style={{ background: COLORS.opd.bg, color: COLORS.opd.fg }}>{name}</span>
                     ))}

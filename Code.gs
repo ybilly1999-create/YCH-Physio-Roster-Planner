@@ -29,7 +29,7 @@ var C = {
 var CAL_PREFIX = 'CAL_';
 var CAL_HR = 7, CAL_FIRST = 8;
 // CAL columns: B date .. W status X failreason
-var CC = { date:2, weekday:3, type:4, ipd1:5, ipd6:10, opd:11, status:23, fail:24 };
+var CC = { date:2, weekday:3, type:4, ipd1:5, ipd6:10, opd:11, status:24, fail:25 };
 var LOG = 'Change_Log';
 var HOL = 'Holidays';
 var WL  = 'Workload';
@@ -39,7 +39,12 @@ var MK = { // make-up sheets + their Staff_Master round/order columns
   typhoon: { sheet:'Typhoon_Roster',          active:C.ty_active, round:C.ty_round, order:C.ty_order },
   exwx:    { sheet:'Extreme_Weather_Roster',  active:C.ew_active, round:C.ew_round, order:C.ew_order }
 };
-var MK_HIST_FIRST = 6, MK_HIST_DATE = 13, MK_HIST_ABBR = 14, MK_HIST_NAME = 15;
+// HISTORY block (auto-written by roll-call / record-back): col O=15 Date, P=16 Abbrev, Q=17 Name
+var MK_HIST_FIRST = 6, MK_HIST_DATE = 15, MK_HIST_ABBR = 16, MK_HIST_NAME = 17;
+var TEAM = 'Team_List';
+// Duty_Record columns (1-based): B date C post D original E status F substitute G type H confirmed I timestamp
+var DRC = { date:2, post:3, orig:4, status:5, sub:6, type:7, confirmed:8, ts:9 };
+var DR_FIRST = 6;
 
 // ---------------------------------------------------------------- utils
 function _ss(){ return SpreadsheetApp.getActiveSpreadsheet(); }
@@ -76,7 +81,8 @@ function doGet(e){
       case 'getStaff':     return _out({ok:true, rows:getStaff()});
       case 'getHolidays':  return _out({ok:true, rows:readTable(HOL)});
       case 'getCalendar':  return _out({ok:true, rows:getCalendar(e.parameter.year, e.parameter.from, e.parameter.to)});
-      case 'getMakeup':    return _out({ok:true, rows:getMakeup(e.parameter.type)});
+      case 'getMakeup':    return _out({ok:true, rows:getMakeup(e.parameter.type), off:getMakeupOff(e.parameter.type)});
+      case 'getTeam':      return _out({ok:true, rows:getTeam()});
       case 'getRollcall':  return _out({ok:true, rows:getRollcall(e.parameter.date)});
       case 'getWorkload':  return _out({ok:true, rows:readTable(WL)});
       default:             return _out({ok:false, error:'unknown action '+a});
@@ -105,6 +111,7 @@ function doPost(e){
         case 'saveRollcall':   return _out(saveRollcall(body, role));
         case 'randomizePH':    return _out(randomizePH(body, role));
         case 'upsertStaff':    return _out(upsertStaff(body, role));
+        case 'deleteStaff':    return _out(deleteStaff(body, role));
         case 'setActive':      return _out(setActive(body, role));
         case 'rebuildOrders':  return _out(rebuildOrders(body, role));
         case 'generateCalendar': return _out(generateCalendar(body, role));
@@ -135,7 +142,7 @@ function getMeta(){
     var m=s.getName().match(/^CAL_(\d{4})$/); if(m) years.push(Number(m[1]));
   });
   years.sort();
-  return {ok:true, name:'YCH Physio Dept Roster', years:years,
+  return {ok:true, name:'YCH Physio Dept Roster Management System', version:'r2-2026-07-18', years:years,
           tz:Session.getScriptTimeZone(), serverTime:_now()};
 }
 function getStaff(){
@@ -182,17 +189,46 @@ function getCalendar(year, from, to){
   if(last<CAL_FIRST) return [];
   var vals=sh.getRange(CAL_FIRST,1,last-CAL_FIRST+1, CC.fail).getValues();
   var tz=Session.getScriptTimeZone(); var out=[];
+  // Build a date-keyed roll-call map from Duty_Record so each calendar day
+  // can be coloured (confirmed / sick / substitute) directly in the grid.
+  var drMap=_dutyRecordByDate();
   vals.forEach(function(r){
     var d=r[CC.date-1]; if(!d) return;
     var ds=(d instanceof Date)?Utilities.formatDate(d,tz,'yyyy-MM-dd'):String(d);
     if(from && ds<from) return; if(to && ds>to) return;
+    var dr=drMap[ds]||null;
     out.push({
       date:ds, weekday:r[CC.weekday-1], type:r[CC.type-1],
       ipd:[r[4],r[5],r[6],r[7],r[8],r[9]].filter(function(x){return x;}),
-      opd:r[CC.opd-1], status:r[CC.status-1], fail:r[CC.fail-1]
+      opd:r[CC.opd-1],
+      shs:[r[17],r[18]].filter(function(x){return x;}),
+      status:r[CC.status-1], fail:r[CC.fail-1],
+      confirmed: dr?dr.confirmed:false,
+      sick: dr?dr.sick:[],
+      substitute: dr?dr.substitute:[]
     });
   });
   return out;
+}
+// Read Duty_Record once and group by date -> {confirmed, sick:[names], substitute:[names]}.
+function _dutyRecordByDate(){
+  var sh=_sh(DR); var map={};
+  if(!sh) return map;
+  var last=sh.getLastRow(); if(last<DR_FIRST) return map;
+  var vals=sh.getRange(DR_FIRST,1,last-DR_FIRST+1, DRC.ts).getValues();
+  var tz=Session.getScriptTimeZone();
+  vals.forEach(function(r){
+    var d=r[DRC.date-1]; if(!d) return;
+    var ds=(d instanceof Date)?Utilities.formatDate(d,tz,'yyyy-MM-dd'):String(d);
+    if(!map[ds]) map[ds]={confirmed:false, sick:[], substitute:[]};
+    var e=map[ds];
+    if(r[DRC.confirmed-1]===true || String(r[DRC.confirmed-1]).toUpperCase()==='TRUE' || String(r[DRC.confirmed-1]).toUpperCase()==='Y') e.confirmed=true;
+    var st=String(r[DRC.status-1]||'').toLowerCase();
+    var orig=r[DRC.orig-1], sub=r[DRC.sub-1];
+    if(st.indexOf('sick')>=0 && orig) e.sick.push(orig);
+    if(sub) e.substitute.push(sub);
+  });
+  return map;
 }
 function getMakeup(type){
   var m=MK[type]; if(!m) return [];
@@ -201,18 +237,53 @@ function getMakeup(type){
     return g.active==='Y';
   });
   staff.forEach(function(s){ s.g = type==='sick'?s.sk : type==='typhoon'?s.ty : s.ew; });
-  staff.sort(function(a,b){ return (a.g.round-b.g.round)||(a.g.order-b.g.order); });
+  staff.sort(function(a,b){ return (Number(a.g.round)-Number(b.g.round))||(Number(a.g.order)-Number(b.g.order)); });
   return staff.map(function(s,i){
-    return {pos:i+1, abbr:s.abbr, name:s.name, round:s.g.round, order:s.g.order};
+    return {pos:i+1, abbr:s.abbr, name:s.name, round:Number(s.g.round)||1, order:Number(s.g.order)||0};
   });
 }
-function getRollcall(date){
-  var all=readTable(DR);
-  var tz=Session.getScriptTimeZone();
-  return all.filter(function(r){
-    var d=r.Date; var ds=(d instanceof Date)?Utilities.formatDate(d,tz,'yyyy-MM-dd'):String(d);
-    return ds===date;
+// Staff NOT on the given make-up list (active !== 'Y')
+function getMakeupOff(type){
+  var staff=getStaff().filter(function(s){
+    var g = type==='sick'?s.sk : type==='typhoon'?s.ty : s.ew;
+    return g.active!=='Y';
   });
+  return staff.map(function(s){ return {abbr:s.abbr, name:s.name}; });
+}
+// Team_List (for Sat/Sun rotation + display)
+function getTeam(){
+  var sh=_sh(TEAM); if(!sh) return [];
+  var data=sh.getDataRange().getValues();
+  var hr=-1;
+  for(var i=0;i<data.length;i++){
+    var row=data[i].map(function(v){return String(v).trim();});
+    if(row.indexOf('Team')>=0 && row.indexOf('Sub')>=0){ hr=i; break; }
+  }
+  if(hr<0) return [];
+  var heads=data[hr].map(function(h){return String(h).trim();});
+  var iTeam=heads.indexOf('Team'), iSub=heads.indexOf('Sub'), iCat=heads.indexOf('Cat'),
+      iAb=heads.indexOf('Abbrev'), iNm=heads.indexOf('Name'), iTier=heads.indexOf('Tier');
+  var out=[];
+  for(var r=hr+1;r<data.length;r++){
+    var d=data[r]; if(!d[iAb]) continue;
+    out.push({team:String(d[iTeam]).trim(), sub:String(d[iSub]).trim(), cat:String(d[iCat]).trim(),
+              abbr:String(d[iAb]).trim(), name:String(d[iNm]).trim(), tier:d[iTier]});
+  }
+  return out;
+}
+function getRollcall(date){
+  var sh=_sh(DR); if(!sh) return [];
+  var last=sh.getLastRow(); if(last<DR_FIRST) return [];
+  var vals=sh.getRange(DR_FIRST,1,last-DR_FIRST+1, DRC.ts).getValues();
+  var tz=Session.getScriptTimeZone(); var out=[];
+  vals.forEach(function(r){
+    var d=r[DRC.date-1]; if(!d) return;
+    var ds=(d instanceof Date)?Utilities.formatDate(d,tz,'yyyy-MM-dd'):String(d);
+    if(ds!==date) return;
+    out.push({ date:ds, post:r[DRC.post-1], original:r[DRC.orig-1], status:r[DRC.status-1],
+               substitute:r[DRC.sub-1], type:r[DRC.type-1], confirmed:r[DRC.confirmed-1] });
+  });
+  return out;
 }
 
 // ---------------------------------------------------------------- Staff_Master row lookup
@@ -320,31 +391,81 @@ function _appendMakeupHistory(sheetName, date, abbr, name){
 }
 
 // ---------------------------------------------------------------- saveRollcall (attendance + subs + workload)
+// UPSERT by date: removes any existing Duty_Record rows for that date, then rewrites the full
+// day. Records Original (rostered staff) + Substitute (helper). Bumps the substitute's sick round
+// ONLY for newly-added sick subs (compared to what was previously saved). Updates Workload row
+// (one per date). Marks the calendar day confirmed so the frontend colours it.
 function saveRollcall(body, role){
   var date=body.date;
-  var att = body.attendance || [];  // [{abbr, post, status:'present'|'sick', substitute?}]
+  var att = body.attendance || [];  // [{post, original, status:'present'|'sick', substitute?, type?}]
   var wl  = body.workload || null;  // {icuhdu, ortho, neuro, ms, newcase, by}
   var dr=_sh(DR);
+
+  // 1) prior saved rows (avoid double-bumping sick rounds on re-save)
+  var prior=getRollcall(date);
+  var priorSubs={}; prior.forEach(function(p){ if(p.status==='sick' && p.substitute) priorSubs[p.original+'>'+p.substitute]=1; });
+
+  // 2) delete existing rows for this date (upsert — no duplicates)
+  _deleteDutyRecordRows(date);
+
+  // 3) append fresh rows
   att.forEach(function(a){
-    dr.appendRow([date, a.abbr, a.post||'', a.status||'present', a.substitute||'', a.type||'', _now()]);
-    if(a.status==='sick' && a.substitute){
-      // bump substitute's sick round
+    var r=_firstEmptyDutyRow();
+    dr.getRange(r,DRC.date).setValue(date);
+    dr.getRange(r,DRC.post).setValue(a.post||'');
+    dr.getRange(r,DRC.orig).setValue(a.original||a.abbr||'');
+    dr.getRange(r,DRC.status).setValue(a.status||'present');
+    dr.getRange(r,DRC.sub).setValue(a.substitute||'');
+    dr.getRange(r,DRC.type).setValue(a.type||'');
+    dr.getRange(r,DRC.confirmed).setValue('Y');
+    dr.getRange(r,DRC.ts).setValue(_now());
+    if(a.status==='sick' && a.substitute && !priorSubs[(a.original||a.abbr)+'>'+a.substitute]){
       var row=_findStaffRow(a.substitute);
-      if(row>0){ var cur=_sh(SM).getRange(row,C.sk_round).getValue()||1;
+      if(row>0){ var cur=Number(_sh(SM).getRange(row,C.sk_round).getValue())||1;
         _sh(SM).getRange(row,C.sk_round).setValue(cur+1);
         _appendMakeupHistory(MK.sick.sheet, date, a.substitute, _sh(SM).getRange(row,C.name).getValue());
       }
     }
   });
+
+  // 4) Workload (one row per date, upsert)
   if(wl){
     var w=_sh(WL); var r=_wlRowForDate(date);
     var vals=[date, num(wl.icuhdu), num(wl.ortho), num(wl.neuro), num(wl.ms), num(wl.newcase)];
     w.getRange(r,2,1,6).setValues([vals]);
-    w.getRange(r,9).setValue(wl.by||role);           // Confirmed by (col I=9)
-    w.getRange(r,10).setValue(_now());               // Timestamp (col J=10)
+    w.getRange(r,9).setValue(wl.by||role);
+    w.getRange(r,10).setValue(_now());
   }
+
+  // 5) mark calendar day confirmed (note) so colours refresh
+  _markCalendarConfirmed(date);
+
+  SpreadsheetApp.flush();
   _log('saveRollcall', date+' ('+att.length+' staff)', body.user||role);
-  return {ok:true, saved:att.length};
+  return {ok:true, saved:att.length, rows:getRollcall(date)};
+}
+function _firstEmptyDutyRow(){
+  var dr=_sh(DR); var last=Math.max(dr.getLastRow(),DR_FIRST-1);
+  for(var r=DR_FIRST;r<=last;r++){ if(!dr.getRange(r,DRC.date).getValue()) return r; }
+  return last+1;
+}
+function _deleteDutyRecordRows(date){
+  var dr=_sh(DR); var last=dr.getLastRow(); if(last<DR_FIRST) return;
+  var tz=Session.getScriptTimeZone(); var toDel=[];
+  var vals=dr.getRange(DR_FIRST,DRC.date,last-DR_FIRST+1,1).getValues();
+  for(var i=0;i<vals.length;i++){
+    var d=vals[i][0]; if(!d) continue;
+    var ds=(d instanceof Date)?Utilities.formatDate(d,tz,'yyyy-MM-dd'):String(d);
+    if(ds===date) toDel.push(DR_FIRST+i);
+  }
+  for(var k=toDel.length-1;k>=0;k--) dr.deleteRow(toDel[k]);
+}
+function _markCalendarConfirmed(date){
+  var year=Number(String(date).slice(0,4));
+  var info=_calStatusForDate(year, date);
+  if(info && info.row){
+    _sh(CAL_PREFIX+year).getRange(info.row, CC.status).setNote('CONFIRMED '+_now());
+  }
 }
 function num(x){ return (x===''||x===null||x===undefined)?'':Number(x); }
 function _wlRowForDate(date){
@@ -375,25 +496,59 @@ function randomizePH(body, role){
 
 // ---------------------------------------------------------------- upsertStaff / setActive
 function upsertStaff(body, role){
-  var s=body.staff; if(!s||!s.abbr) return {ok:false, error:'need abbr'};
-  var row=_findStaffRow(s.abbr);
+  var s=body.staff || body; // tolerate {staff:{...}} or flat
+  var abbr=(s.abbr!==undefined?s.abbr:body.abbr);
+  if(abbr===undefined || String(abbr).trim()===''){ return {ok:false, error:'need abbr / 缺少 Abbreviation'}; }
+  abbr=String(abbr).trim();
   var sh=_sh(SM);
-  if(row<0){ // add at first empty
+  var row=_findStaffRow(abbr);
+  var isNew=false;
+  if(row<0){
     var col=sh.getRange(SM_FIRST,C.abbr,SM_LAST-SM_FIRST+1,1).getValues();
-    for(var i=0;i<col.length;i++) if(!col[i][0]){ row=SM_FIRST+i; break; }
-    if(row<0) return {ok:false, error:'staff master full'};
+    for(var i=0;i<col.length;i++) if(!col[i][0] || String(col[i][0]).trim()===''){ row=SM_FIRST+i; break; }
+    if(row<0) return {ok:false, error:'staff master full (max '+(SM_LAST-SM_FIRST+1)+')'};
+    isNew=true;
   }
-  var map={name:C.name,abbr:C.abbr,ort:C.ort,neuro:C.neuro,ms:C.ms,tier:C.tier,mentor:C.mentor,
-           ph_order:C.ph_order, shs_order:C.shs_order, active:C.active,
+  sh.getRange(row,C.abbr).setValue(abbr);
+  var map={name:C.name,ort:C.ort,neuro:C.neuro,ms:C.ms,tier:C.tier,mentor:C.mentor,
+           ph_order:C.ph_order, ph_round:C.ph_round, shs_order:C.shs_order, active:C.active,
            leave_start:C.leave_start, leave_end:C.leave_end};
-  Object.keys(map).forEach(function(k){ if(s[k]!==undefined) sh.getRange(row,map[k]).setValue(s[k]); });
+  Object.keys(map).forEach(function(k){ if(s[k]!==undefined && s[k]!==null) sh.getRange(row,map[k]).setValue(s[k]); });
+  if(isNew){
+    if(s.active===undefined) sh.getRange(row,C.active).setValue('Y');
+    if(s.ph_round===undefined) sh.getRange(row,C.ph_round).setValue(1);
+    if(s.ph_order===undefined) sh.getRange(row,C.ph_order).setValue(_countStaff());
+  }
   ['ty','ew','sk'].forEach(function(g){
-    if(s[g]){ sh.getRange(row,C[g+'_active']).setValue(s[g].active);
-      if(s[g].round!==undefined) sh.getRange(row,C[g+'_round']).setValue(s[g].round);
-      if(s[g].order!==undefined) sh.getRange(row,C[g+'_order']).setValue(s[g].order); }
+    var grp=s[g];
+    if(grp){
+      if(grp.active!==undefined) sh.getRange(row,C[g+'_active']).setValue(grp.active);
+      if(grp.round!==undefined && grp.round!=='') sh.getRange(row,C[g+'_round']).setValue(Number(grp.round));
+      if(grp.order!==undefined && grp.order!=='') sh.getRange(row,C[g+'_order']).setValue(Number(grp.order));
+    } else if(isNew){
+      sh.getRange(row,C[g+'_active']).setValue('Y');
+      sh.getRange(row,C[g+'_round']).setValue(1);
+      sh.getRange(row,C[g+'_order']).setValue(_countStaff());
+    }
+    sh.getRange(row,C[g+'_round']).setNumberFormat('General');
+    sh.getRange(row,C[g+'_order']).setNumberFormat('General');
   });
-  _log('upsertStaff', s.abbr, body.user||role);
-  return {ok:true, row:row};
+  SpreadsheetApp.flush();
+  _log('upsertStaff', abbr+(isNew?' (new)':' (edit)'), body.user||role);
+  return {ok:true, row:row, isNew:isNew};
+}
+function _countStaff(){
+  var sh=_sh(SM); var col=sh.getRange(SM_FIRST,C.abbr,SM_LAST-SM_FIRST+1,1).getValues();
+  var n=0; col.forEach(function(r){ if(r[0]&&String(r[0]).trim()!=='') n++; }); return n;
+}
+function deleteStaff(body, role){
+  var abbr=String(body.abbr||'').trim(); if(!abbr) return {ok:false, error:'need abbr'};
+  var sh=_sh(SM); var row=_findStaffRow(abbr);
+  if(row<0) return {ok:false, error:'staff not found'};
+  sh.getRange(row,C.name, 1, C.leave_end-C.name+1).clearContent();
+  SpreadsheetApp.flush();
+  _log('deleteStaff', abbr, body.user||role);
+  return {ok:true};
 }
 function setActive(body, role){
   var row=_findStaffRow(body.abbr); if(row<0) return {ok:false,error:'not found'};
@@ -441,44 +596,113 @@ function generateCalendar(body, role){
   return {ok:true, sheet:name, days:days};
 }
 
-// ---------------------------------------------------------------- generateRoster (round-based auto-fill)
-// Assign eligible staff (Tier 1/2, Active=Y, not on leave) down PH order for PH/RD/SH days,
-// skipping any who make the day FAIL, continuing from skipped position next day; one duty per
-// round per person. Days that can't satisfy STATUS get marked NEEDS ADMIN.
+// ---------------------------------------------------------------- generateRoster
+// Sat / Sun duty follows the TEAM LIST rotation (NOT PH order):
+//   Round 1 sub-team order: A1, A2, B1, B2, C1, C2, D1, D2
+//   Round 2 swaps each team's sub-teams: A2, A1, B2, B1, C2, C1, D2, D1
+//   ...alternating every round.
+// A whole sub-team backs one weekend day together. Sat needs 6 IPD, Sun needs 5.
+// "Sat Only" staff (= sub-team 1 helpers) join their TEAM when that team backs a SAT.
+// "Sun Only" staff (= sub-team 2 helpers) join their TEAM when that team backs a SUN.
+// PH / SH / RD days keep the old PH-order round-robin.
 function generateRoster(body, role){
   var year=Number(body.year);
   var sh=_sh(CAL_PREFIX+year); if(!sh) return {ok:false, error:'no '+CAL_PREFIX+year};
-  var staff=getStaff().filter(function(s){ return (s.tier==1||s.tier==2) && s.active==='Y'; });
-  staff.sort(function(a,b){ return (a.ph_order||999)-(b.ph_order||999); });
-  var pool=staff.map(function(s){return s.abbr;});
-  var ptr=0, used={};
+  var tz=Session.getScriptTimeZone();
+  var fromM=body.fromMonth||1, toM=body.toMonth||12;
   var last=sh.getLastRow();
   var rows=sh.getRange(CAL_FIRST,1,last-CAL_FIRST+1,CC.fail).getValues();
-  var tz=Session.getScriptTimeZone(); var filled=0, needAdmin=0;
-  var fromM=body.fromMonth||1, toM=body.toMonth||12;
+
+  // ---- Build team-list sub-team roster ----
+  var team=getTeam();                      // [{team,sub,cat,abbr,name,tier}]
+  var activeMap={}; getStaff().forEach(function(s){ activeMap[s.abbr]=(s.active==='Y'); });
+  var teams=['A','B','C','D'];
+  // core members: sub == '1' or '2'
+  var core={};   // core['A']['1'] = [abbr,...]
+  var satOnly={},sunOnly={}; // per team
+  teams.forEach(function(t){ core[t]={'1':[],'2':[]}; satOnly[t]=[]; sunOnly[t]=[]; });
+  team.forEach(function(m){
+    var t=m.team, sub=String(m.sub||'');
+    if(!core[t]) return;
+    if(sub==='1'||sub==='2') core[t][sub].push(m.abbr);
+    else if(/sat/i.test(sub)) satOnly[t].push(m.abbr);
+    else if(/sun/i.test(sub)) sunOnly[t].push(m.abbr);
+  });
+  // rotation sequence of {team,sub}
+  function rotationSeq(roundEven){
+    var seq=[];
+    teams.forEach(function(t){
+      if(!roundEven){ seq.push({team:t,sub:'1'}); seq.push({team:t,sub:'2'}); }
+      else          { seq.push({team:t,sub:'2'}); seq.push({team:t,sub:'1'}); }
+    });
+    return seq;
+  }
+
+  // ---- PH-order pool (for PH/SH/RD) ----
+  var phStaff=getStaff().filter(function(s){ return (s.tier==1||s.tier==2) && s.active==='Y'; });
+  phStaff.sort(function(a,b){ return (Number(a.ph_order)||999)-(Number(b.ph_order)||999); });
+  var phPool=phStaff.map(function(s){return s.abbr;}); var phPtr=0, phUsed={};
+
+  // weekend rotation pointers
+  var wkIdx=0;               // index into full rotation sequence (advances per weekend DAY)
+  var filled=0, needAdmin=0, satDone=0, sunDone=0;
+
   for(var i=0;i<rows.length;i++){
     var d=rows[i][CC.date-1]; if(!(d instanceof Date)) continue;
     if((d.getMonth()+1)<fromM || (d.getMonth()+1)>toM) continue;
-    var type=String(rows[i][CC.type-1]||'').toUpperCase();
-    if(['PH','RD','SH','SUN'].indexOf(type)<0 && type!=='') { /* only auto weekend/PH */ }
-    // We only auto-generate for PH/RD/SH/Sun (5 IPD). Skip normal weekdays.
-    if(['PH','RD','SH','SUN'].indexOf(type)<0) continue;
-    var need=5, chosen=[], tried=0;
-    while(chosen.length<need && tried<pool.length*2){
-      if(Object.keys(used).length>=pool.length) used={}; // round complete -> reset
-      var cand=pool[ptr%pool.length]; ptr++; tried++;
-      if(used[cand]) continue;
-      chosen.push(cand); used[cand]=1;
+    var rawType=String(rows[i][CC.type-1]||'').trim();
+    var type=rawType.toUpperCase();
+    var calRow=CAL_FIRST+i;
+    var ds=Utilities.formatDate(d,tz,'yyyy-MM-dd');
+
+    if(type==='SAT' || type==='SUN'){
+      var isSat=(type==='SAT');
+      // pick next sub-team in rotation
+      var round=Math.floor(wkIdx/(teams.length*2));      // which pass
+      var seq=rotationSeq(round%2===1);
+      var pick=seq[wkIdx%(teams.length*2)];
+      wkIdx++;
+      var t=pick.team, sub=pick.sub;
+      var members=(core[t][sub]||[]).filter(function(a){return activeMap[a]!==false;});
+      // add day-specific helpers who follow this team
+      var helpers=isSat?satOnly[t]:sunOnly[t];
+      helpers=helpers.filter(function(a){return activeMap[a]!==false;});
+      var chosen=members.concat(helpers);
+      var need=isSat?6:5;
+      // top up from the OTHER sub-team of same team if short, then next teams
+      if(chosen.length<need){
+        var other=core[t][sub==='1'?'2':'1']||[];
+        other.forEach(function(a){ if(chosen.length<need && chosen.indexOf(a)<0 && activeMap[a]!==false) chosen.push(a); });
+      }
+      chosen=chosen.slice(0,need);
+      _writeIpd(year, calRow, chosen);
+      var remark='Team '+t+' (sub-team '+sub+')'+(helpers.length?' + '+(isSat?'Sat-only':'Sun-only')+' '+helpers.join(','):'');
+      sh.getRange(calRow, CC.status).setNote(remark);
+      var chkW=_calStatusForDate(year, ds);
+      if(String(chkW.status).toUpperCase().indexOf('OK')<0){ needAdmin++; }
+      else { filled++; if(isSat) satDone++; else sunDone++; }
+      continue;
     }
-    _writeIpd(year, CAL_FIRST+i, chosen);
-    var chk=_calStatusForDate(year, Utilities.formatDate(d,tz,'yyyy-MM-dd'));
-    if(String(chk.status).toUpperCase().indexOf('OK')<0){
-      sh.getRange(CAL_FIRST+i, CC.status).setNote('NEEDS ADMIN'); needAdmin++;
-    } else filled++;
+
+    if(['PH','RD','SH'].indexOf(type)>=0){
+      var need2=5, chosen2=[], tried=0;
+      while(chosen2.length<need2 && tried<phPool.length*2){
+        if(Object.keys(phUsed).length>=phPool.length) phUsed={};
+        var cand=phPool[phPtr%phPool.length]; phPtr++; tried++;
+        if(phUsed[cand]) continue;
+        chosen2.push(cand); phUsed[cand]=1;
+      }
+      _writeIpd(year, calRow, chosen2);
+      var chk=_calStatusForDate(year, ds);
+      if(String(chk.status).toUpperCase().indexOf('OK')<0){ sh.getRange(calRow, CC.status).setNote('NEEDS ADMIN'); needAdmin++; }
+      else filled++;
+      continue;
+    }
+    // normal weekdays: skip (manual)
   }
   SpreadsheetApp.flush();
-  _log('generateRoster', year+' m'+fromM+'-'+toM+' filled='+filled+' needAdmin='+needAdmin, body.user||role);
-  return {ok:true, filled:filled, needAdmin:needAdmin};
+  _log('generateRoster', year+' m'+fromM+'-'+toM+' filled='+filled+' sat='+satDone+' sun='+sunDone+' needAdmin='+needAdmin, body.user||role);
+  return {ok:true, filled:filled, sat:satDone, sun:sunDone, needAdmin:needAdmin};
 }
 
 // ---------------------------------------------------------------- Holidays
