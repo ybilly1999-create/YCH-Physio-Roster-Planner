@@ -12,16 +12,6 @@
   --primary-hover: 188 48% 26%;
   --navy: 186 48% 20%;         /* #1B474D */
 }
-.dark {
-  --bg: 200 20% 8%;
-  --surface: 200 15% 12%;
-  --border: 205 12% 22%;
-  --text: 200 10% 88%;
-  --muted: 205 8% 60%;
-  --primary: 187 40% 45%;
-  --primary-hover: 187 45% 55%;
-  --navy: 186 30% 30%;
-}
 * { border-color: hsl(var(--border)); }
 body { background: hsl(var(--bg)); color: hsl(var(--text)); font-family: Inter, system-ui, sans-serif; }
 .card { background: hsl(var(--surface)); border: 1px solid hsl(var(--border)); border-radius: 0.75rem; }

@@ -40,5 +40,6 @@ export const getStaff     = () => apiGet('getStaff');
 export const getHolidays  = () => apiGet('getHolidays');
 export const getCalendar  = (year, from, to) => apiGet('getCalendar', { year, ...(from && { from }), ...(to && { to }) });
 export const getMakeup    = (type) => apiGet('getMakeup', { type });
+export const getTeam      = () => apiGet('getTeam');
 export const getRollcall  = (date) => apiGet('getRollcall', { date });
 export const getMeta      = () => apiGet('getMeta');

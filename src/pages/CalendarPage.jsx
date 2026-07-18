@@ -32,6 +32,12 @@ function getOpdList(row) {
   if (typeof opd === 'string') return opd.split(',').map(s => s.trim()).filter(Boolean);
   return [];
 }
+function getShsList(row) {
+  const shs = row?.SHS ?? row?.shs ?? [];
+  if (Array.isArray(shs)) return shs.filter(Boolean);
+  if (typeof shs === 'string') return shs.split(',').map(s => s.trim()).filter(Boolean);
+  return [];
+}
 
 export default function CalendarPage() {
   const { isAdmin, token } = useAuth();
@@ -255,6 +261,11 @@ export default function CalendarPage() {
                         {name} OPD
                       </span>
                     ))}
+                    {getShsList(row).map((name, idx) => (
+                      <span key={`shs-${idx}`} className="text-[10px] px-1 rounded font-semibold" style={{ background: COLORS.shs.bg, color: COLORS.shs.fg }}>
+                        {name} SHS
+                      </span>
+                    ))}
                   </div>
                   {fails && <div className="text-[10px] text-red-600 mt-1 font-semibold">⚠ NEEDS ADMIN</div>}
                 </button>
@@ -293,6 +304,9 @@ export default function CalendarPage() {
                     ))}
                     {opdList.map((name, idx) => (
                       <span key={`opd-${idx}`} className="text-[10px] px-1 rounded" style={{ background: COLORS.opd.bg, color: COLORS.opd.fg }}>{name}</span>
+                    ))}
+                    {getShsList(row).map((name, idx) => (
+                      <span key={`shs-${idx}`} className="text-[10px] px-1 rounded font-semibold" style={{ background: COLORS.shs.bg, color: COLORS.shs.fg }}>{name} SHS</span>
                     ))}
                   </div>
                   {fails && <AlertTriangle size={14} className="text-red-600 shrink-0" />}
@@ -358,6 +372,19 @@ export default function CalendarPage() {
                     <div className="flex flex-wrap gap-1">
                       {getOpdList(selectedRow).map((name, idx) => (
                         <span key={idx} className="text-xs px-2 py-0.5 rounded" style={{ background: COLORS.opd.bg, color: COLORS.opd.fg }}>
+                          {name}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {getShsList(selectedRow).length > 0 && (
+                  <div>
+                    <div className="text-xs text-muted mb-1">SHS 特別半日更</div>
+                    <div className="flex flex-wrap gap-1">
+                      {getShsList(selectedRow).map((name, idx) => (
+                        <span key={idx} className="text-xs px-2 py-0.5 rounded font-semibold" style={{ background: COLORS.shs.bg, color: COLORS.shs.fg }} data-testid={`chip-shs-${idx}`}>
                           {name}
                         </span>
                       ))}

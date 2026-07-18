@@ -21,6 +21,7 @@ export default function Makeup() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [rows, setRows] = useState([]);
+  const [off, setOff] = useState([]); // staff NOT on this list
   const [dialog, setDialog] = useState(null); // {abbr, name}
   const [backDate, setBackDate] = useState(todayStr());
   const [busy, setBusy] = useState(false);
@@ -34,8 +35,8 @@ export default function Makeup() {
     setMsg(null);
     try {
       const res = await getMakeup(type);
-      if (!res?.ok) { setError('無法載入名單 Failed to load makeup list'); setRows([]); }
-      else setRows(res.rows || []);
+      if (!res?.ok) { setError('無法載入名單 Failed to load makeup list'); setRows([]); setOff([]); }
+      else { setRows(res.rows || []); setOff(res.off || []); }
     } catch (e) {
       setError(e.message || '網絡錯誤 Network error');
     } finally {
@@ -106,52 +107,79 @@ export default function Makeup() {
         </div>
       )}
 
-      {!loading && !error && rows.length === 0 && (
-        <div className="card p-10 text-center text-muted" data-testid="makeup-empty">
-          此名單暫無資料 No data for this list.
-        </div>
-      )}
+      {!loading && !error && (
+        <>
+          {/* TOP table — staff ON the list */}
+          <div className="card p-2 overflow-x-auto" data-testid="card-onlist">
+            <div className="px-2 pt-1 pb-2 text-sm font-bold text-navy">在名單內 On List ({rows.length})</div>
+            {rows.length === 0 ? (
+              <p className="p-4 text-center text-muted text-sm" data-testid="makeup-onlist-empty">此名單暫無在冊人員 No staff on this list.</p>
+            ) : (
+            <table className="w-full text-sm min-w-[480px]" data-testid="table-makeup">
+              <thead>
+                <tr className="text-left text-xs text-muted border-b border-border">
+                  <th className="p-2">#</th>
+                  <th className="p-2">簡稱 Abbrev</th>
+                  <th className="p-2">姓名 Name</th>
+                  <th className="p-2">輪次 Round</th>
+                  <th className="p-2">次序 Order</th>
+                  <th className="p-2">操作 Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, idx) => {
+                  const isNext10 = idx < 10;
+                  return (
+                    <tr key={idx} className={`border-b border-border last:border-0 ${isNext10 ? 'bg-primary/5' : ''}`} data-testid={`row-makeup-${row.Abbrev || row.abbr || idx}`}>
+                      <td className="p-2 text-muted">{idx + 1}</td>
+                      <td className="p-2 font-medium text-text">
+                        {isNext10 && <Star size={12} className="inline mr-1 text-primary" fill="currentColor" />}
+                        {row.Abbrev || row.abbr}
+                      </td>
+                      <td className="p-2 text-text">{row.Name || row.name}</td>
+                      <td className="p-2">{row.Round ?? row.round ?? '—'}</td>
+                      <td className="p-2">{row.Order ?? row.order ?? '—'}</td>
+                      <td className="p-2">
+                        <button className="btn btn-ghost !px-2 !py-1 text-xs" onClick={() => openDialog(row)} data-testid={`button-record-back-${row.Abbrev || row.abbr || idx}`}>
+                          <RotateCcw size={12} /> 補返 Record back
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            )}
+            {rows.length > 10 && (
+              <p className="text-xs text-muted p-2">★ 標示前 10 位為 Next-10 建議。Stars mark the Next-10 suggested staff.</p>
+            )}
+          </div>
 
-      {!loading && !error && rows.length > 0 && (
-        <div className="card p-2 overflow-x-auto">
-          <table className="w-full text-sm min-w-[480px]" data-testid="table-makeup">
-            <thead>
-              <tr className="text-left text-xs text-muted border-b border-border">
-                <th className="p-2">#</th>
-                <th className="p-2">簡稱 Abbrev</th>
-                <th className="p-2">姓名 Name</th>
-                <th className="p-2">輪次 Round</th>
-                <th className="p-2">次序 Order</th>
-                <th className="p-2">操作 Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, idx) => {
-                const isNext10 = idx < 10;
-                return (
-                  <tr key={idx} className={`border-b border-border last:border-0 ${isNext10 ? 'bg-primary/5' : ''}`} data-testid={`row-makeup-${row.Abbrev || row.abbr || idx}`}>
-                    <td className="p-2 text-muted">{idx + 1}</td>
-                    <td className="p-2 font-medium text-text">
-                      {isNext10 && <Star size={12} className="inline mr-1 text-primary" fill="currentColor" />}
-                      {row.Abbrev || row.abbr}
-                    </td>
-                    <td className="p-2 text-text">{row.Name || row.name}</td>
-                    <td className="p-2">{row.Round ?? row.round ?? row[`${tab.toUpperCase()}_Round`] ?? '—'}</td>
-                    <td className="p-2">{row.Order ?? row.order ?? row[`${tab.toUpperCase()}_Order`] ?? '—'}</td>
-                    <td className="p-2">
-                      <button className="btn btn-ghost !px-2 !py-1 text-xs" onClick={() => openDialog(row)} data-testid={`button-record-back-${row.Abbrev || row.abbr || idx}`}>
-                        <RotateCcw size={12} /> 補返 Record back
-                      </button>
-                    </td>
+          {/* BOTTOM table — staff NOT on the list */}
+          <div className="card p-2 overflow-x-auto" data-testid="card-offlist">
+            <div className="px-2 pt-1 pb-2 text-sm font-bold text-muted">不在名單內 Not on List ({off.length})</div>
+            {off.length === 0 ? (
+              <p className="p-4 text-center text-muted text-sm" data-testid="makeup-offlist-empty">全部人員都在名單內 Everyone is on this list.</p>
+            ) : (
+            <table className="w-full text-sm min-w-[320px]" data-testid="table-makeup-off">
+              <thead>
+                <tr className="text-left text-xs text-muted border-b border-border">
+                  <th className="p-2">簡稱 Abbrev</th>
+                  <th className="p-2">姓名 Name</th>
+                </tr>
+              </thead>
+              <tbody>
+                {off.map((row, idx) => (
+                  <tr key={idx} className="border-b border-border last:border-0 opacity-70" data-testid={`row-offlist-${row.abbr || idx}`}>
+                    <td className="p-2 font-medium text-text">{row.abbr}</td>
+                    <td className="p-2 text-text">{row.name}</td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          {rows.length > 10 && (
-            <p className="text-xs text-muted p-2">★ 標示前 10 位為 Next-10 建議。Stars mark the Next-10 suggested staff.</p>
-          )}
-        </div>
+                ))}
+              </tbody>
+            </table>
+            )}
+          </div>
+        </>
       )}
 
       {msg && !dialog && (

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { getStaff, apiPost } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { Loader2, AlertTriangle, Save, Plus, CheckCircle2, ToggleLeft, ToggleRight } from 'lucide-react';
+import { Loader2, AlertTriangle, Save, Plus, CheckCircle2, ToggleLeft, ToggleRight, Trash2 } from 'lucide-react';
 
 function blankStaff() {
   return {
@@ -15,29 +15,32 @@ function blankStaff() {
   };
 }
 
+const v = (x, d = '') => (x === null || x === undefined ? d : x);
 function normalizeRow(r) {
+  // Backend getStaff returns nested ty/ew/sk objects: {active, round, order}
+  const sk = r.sk || {}, ty = r.ty || {}, ew = r.ew || {};
   return {
-    Name: r.Name ?? r.name ?? '',
-    Abbrev: r.Abbrev ?? r.abbr ?? '',
-    ORT: r.ORT ?? r.ort ?? '-',
-    NEURO: r.NEURO ?? r.neuro ?? '-',
-    MS: r.MS ?? r['M&S'] ?? r.ms ?? '-',
-    Tier: String(r.Tier ?? r.tier ?? '2'),
-    Mentor: r.Mentor ?? r.mentor ?? '',
-    PHOrder: r.PHOrder ?? r['PH Order'] ?? r.phOrder ?? '',
-    SHSOrder: r.SHSOrder ?? r['SHS Order'] ?? r.shsOrder ?? '',
-    SK_Active: r.SK_Active ?? r['SK Active'] ?? 'Y',
-    SK_Round: r.SK_Round ?? r['SK Round'] ?? '0',
-    SK_Order: r.SK_Order ?? r['SK Order'] ?? '',
-    TY_Active: r.TY_Active ?? r['TY Active'] ?? 'Y',
-    TY_Round: r.TY_Round ?? r['TY Round'] ?? '0',
-    TY_Order: r.TY_Order ?? r['TY Order'] ?? '',
-    EW_Active: r.EW_Active ?? r['EW Active'] ?? 'Y',
-    EW_Round: r.EW_Round ?? r['EW Round'] ?? '0',
-    EW_Order: r.EW_Order ?? r['EW Order'] ?? '',
-    Active: r.Active ?? r.active ?? r['Dept Active'] ?? 'Y',
-    LeaveStart: r.LeaveStart ?? r['Leave Start'] ?? '',
-    LeaveEnd: r.LeaveEnd ?? r['Leave End'] ?? '',
+    Name: v(r.name ?? r.Name),
+    Abbrev: v(r.abbr ?? r.Abbrev),
+    ORT: v(r.ort ?? r.ORT, '-'),
+    NEURO: v(r.neuro ?? r.NEURO, '-'),
+    MS: v(r.ms ?? r.MS ?? r['M&S'], '-'),
+    Tier: String(v(r.tier ?? r.Tier, '2')),
+    Mentor: v(r.mentor ?? r.Mentor),
+    PHOrder: v(r.ph_order ?? r.PHOrder),
+    SHSOrder: v(r.shs_order ?? r.SHSOrder),
+    SK_Active: v(sk.active ?? r.SK_Active, 'Y'),
+    SK_Round: v(sk.round ?? r.SK_Round, '0'),
+    SK_Order: v(sk.order ?? r.SK_Order),
+    TY_Active: v(ty.active ?? r.TY_Active, 'Y'),
+    TY_Round: v(ty.round ?? r.TY_Round, '0'),
+    TY_Order: v(ty.order ?? r.TY_Order),
+    EW_Active: v(ew.active ?? r.EW_Active, 'Y'),
+    EW_Round: v(ew.round ?? r.EW_Round, '0'),
+    EW_Order: v(ew.order ?? r.EW_Order),
+    Active: v(r.active ?? r.Active, 'Y'),
+    LeaveStart: v(r.leave_start ?? r.LeaveStart),
+    LeaveEnd: v(r.leave_end ?? r.LeaveEnd),
     _isNew: false,
   };
 }
@@ -82,8 +85,29 @@ export default function StaffMaster() {
     return issues;
   }
 
+  // Map the UI row (capitalised keys) to the backend's expected snake_case payload.
+  function toPayload(row) {
+    return {
+      abbr: (row.Abbrev || '').trim(),
+      name: row.Name,
+      ort: row.ORT, neuro: row.NEURO, ms: row.MS,
+      tier: row.Tier, mentor: row.Mentor,
+      ph_order: row.PHOrder === '' ? undefined : Number(row.PHOrder),
+      shs_order: row.SHSOrder === '' ? undefined : Number(row.SHSOrder),
+      active: row.Active,
+      leave_start: row.LeaveStart, leave_end: row.LeaveEnd,
+      sk: { active: row.SK_Active, round: row.SK_Round, order: row.SK_Order },
+      ty: { active: row.TY_Active, round: row.TY_Round, order: row.TY_Order },
+      ew: { active: row.EW_Active, round: row.EW_Round, order: row.EW_Order },
+    };
+  }
+
   async function saveRow(idx) {
     const row = rows[idx];
+    if (!(row.Abbrev || '').trim()) {
+      setRowMsg(m => ({ ...m, [idx]: { type: 'error', text: '請輸入簡稱 Abbreviation / Abbreviation is required' } }));
+      return;
+    }
     const issues = validate(row);
     if (issues.length) {
       setRowMsg(m => ({ ...m, [idx]: { type: 'error', text: issues.join('; ') } }));
@@ -92,7 +116,7 @@ export default function StaffMaster() {
     setSavingIdx(idx);
     setRowMsg(m => ({ ...m, [idx]: null }));
     try {
-      const res = await apiPost('upsertStaff', { staff: { ...row, _isNew: undefined } }, token);
+      const res = await apiPost('upsertStaff', { staff: toPayload(row) }, token);
       if (res?.ok) {
         setRowMsg(m => ({ ...m, [idx]: { type: 'ok', text: '已儲存 Saved' } }));
         update(idx, { _isNew: false });
@@ -104,6 +128,20 @@ export default function StaffMaster() {
     } finally {
       setSavingIdx(null);
     }
+  }
+
+  async function deleteRow(idx) {
+    const row = rows[idx];
+    if (row._isNew) { setRows(prev => prev.filter((_, i) => i !== idx)); return; }
+    if (!window.confirm(`確定刪除 ${row.Name || row.Abbrev}？Delete this staff?`)) return;
+    setSavingIdx(idx);
+    try {
+      const res = await apiPost('deleteStaff', { abbr: row.Abbrev }, token);
+      if (res?.ok) { setRows(prev => prev.filter((_, i) => i !== idx)); }
+      else setRowMsg(m => ({ ...m, [idx]: { type: 'error', text: res?.error || '刪除失敗 Delete failed' } }));
+    } catch (e) {
+      setRowMsg(m => ({ ...m, [idx]: { type: 'error', text: e.message || '網絡錯誤 Network error' } }));
+    } finally { setSavingIdx(null); }
   }
 
   async function toggleActive(idx) {
@@ -239,9 +277,14 @@ export default function StaffMaster() {
                   <td className="p-1"><input type="date" className="input !w-32 text-xs" value={row.LeaveStart} onChange={e => update(idx, { LeaveStart: e.target.value })} data-testid={`input-leave-start-${idx}`} /></td>
                   <td className="p-1"><input type="date" className="input !w-32 text-xs" value={row.LeaveEnd} onChange={e => update(idx, { LeaveEnd: e.target.value })} data-testid={`input-leave-end-${idx}`} /></td>
                   <td className="p-1">
-                    <button className="btn btn-primary !px-2 !py-1" onClick={() => saveRow(idx)} disabled={savingIdx === idx} data-testid={`button-save-staff-${idx}`}>
-                      {savingIdx === idx ? <Loader2 className="animate-spin" size={14} /> : <Save size={14} />}
-                    </button>
+                    <div className="flex gap-1">
+                      <button className="btn btn-primary !px-2 !py-1" onClick={() => saveRow(idx)} disabled={savingIdx === idx} data-testid={`button-save-staff-${idx}`}>
+                        {savingIdx === idx ? <Loader2 className="animate-spin" size={14} /> : <Save size={14} />}
+                      </button>
+                      <button className="btn btn-ghost !px-2 !py-1 text-pink-700" onClick={() => deleteRow(idx)} disabled={savingIdx === idx} data-testid={`button-delete-staff-${idx}`} title="刪除 Delete">
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
                     {rowMsg[idx] && (
                       <div className={`mt-1 text-[10px] ${rowMsg[idx].type === 'ok' ? 'text-green-700' : 'text-pink-700'}`} data-testid={`text-staff-msg-${idx}`}>
                         {rowMsg[idx].type === 'ok' ? <CheckCircle2 size={10} className="inline mr-0.5" /> : <AlertTriangle size={10} className="inline mr-0.5" />}

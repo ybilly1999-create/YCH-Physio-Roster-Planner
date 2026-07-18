@@ -25,8 +25,8 @@ export default function Login() {
     <div className="min-h-screen flex items-center justify-center p-4 bg-bg">
       <div className="card w-full max-w-sm p-6" data-testid="card-login">
         <div className="flex flex-col items-center mb-6">
-          <div className="w-14 h-14 rounded-xl bg-primary flex items-center justify-center text-white font-bold text-2xl mb-3">物</div>
-          <h1 className="text-xl font-bold text-navy text-center">YCH Physio Dept 排更系統</h1>
+          <div className="w-14 h-14 rounded-xl bg-primary flex items-center justify-center text-white font-bold text-xl mb-3">YCH</div>
+          <h1 className="text-xl font-bold text-navy text-center">YCH Physio Dept</h1>
           <p className="text-sm text-muted text-center mt-1">Roster Management System</p>
         </div>
 

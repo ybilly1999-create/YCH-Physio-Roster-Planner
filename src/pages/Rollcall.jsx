@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../lib/auth';
-import { getCalendar, getStaff, getMakeup, apiPost } from '../lib/api';
+import { getCalendar, getStaff, getMakeup, getRollcall, apiPost } from '../lib/api';
 import { Loader2, AlertTriangle, CheckCircle2, Save } from 'lucide-react';
 
 function pad(n) { return String(n).padStart(2, '0'); }
@@ -36,10 +36,11 @@ export default function Rollcall() {
     (async () => {
       try {
         const year = new Date(date).getFullYear();
-        const [calRes, staffRes, makeupRes] = await Promise.all([
+        const [calRes, staffRes, makeupRes, savedRes] = await Promise.all([
           getCalendar(year, date, date),
           getStaff(),
           getMakeup('sick'),
+          getRollcall(date),
         ]);
         if (cancelled) return;
         if (!calRes?.ok || !staffRes?.ok) {
@@ -50,22 +51,42 @@ export default function Rollcall() {
         const staffRows = staffRes.rows || [];
         setStaff(staffRows);
         setSickNext10(makeupRes?.ok ? (makeupRes.rows || []).slice(0, 10) : []);
+        const nameOf = (abbr) => {
+          const m = staffRows.find(s => (s.Abbrev || s.abbr) === abbr);
+          return m?.Name || m?.name || abbr;
+        };
 
-        const row = (calRes.rows || [])[0];
-        const ipdList = getIpdList(row);
-        const initialAttendance = ipdList.map(nameOrAbbr => {
-          const match = staffRows.find(s => (s.Abbrev || s.abbr) === nameOrAbbr || (s.Name || s.name) === nameOrAbbr);
-          return {
-            abbr: match?.Abbrev || match?.abbr || nameOrAbbr,
-            name: match?.Name || match?.name || nameOrAbbr,
-            post: 'IPD',
-            status: 'present',
-            substitute: '',
-          };
-        });
-        setAttendance(initialAttendance);
-        setWorkload({ icuhdu: '', ortho: '', neuro: '', ms: '', newcase: '' });
-        setConfirmedBy('');
+        const saved = savedRes?.ok ? (savedRes.rows || []) : [];
+        if (saved.length > 0) {
+          // RELOAD previously saved record (incl. who is helping the sick duty)
+          setAttendance(saved.map(r => ({
+            abbr: r.original,
+            name: nameOf(r.original),
+            post: r.post || 'IPD',
+            status: r.status || 'present',
+            substitute: r.substitute || '',
+            type: r.type || '',
+          })));
+          setConfirmedBy('');
+          setWorkload({ icuhdu: '', ortho: '', neuro: '', ms: '', newcase: '' });
+        } else {
+          const row = (calRes.rows || [])[0];
+          const ipdList = getIpdList(row);
+          const initialAttendance = ipdList.map(nameOrAbbr => {
+            const match = staffRows.find(s => (s.Abbrev || s.abbr) === nameOrAbbr || (s.Name || s.name) === nameOrAbbr);
+            return {
+              abbr: match?.Abbrev || match?.abbr || nameOrAbbr,
+              name: match?.Name || match?.name || nameOrAbbr,
+              post: 'IPD',
+              status: 'present',
+              substitute: '',
+            };
+          });
+          setAttendance(initialAttendance);
+          setWorkload({ icuhdu: '', ortho: '', neuro: '', ms: '', newcase: '' });
+          // Confirmed by defaults to the roster staff on duty that date
+          setConfirmedBy(ipdList.join(', '));
+        }
       } catch (e) {
         if (!cancelled) setError(e.message || '網絡錯誤 Network error');
       } finally {
@@ -95,7 +116,7 @@ export default function Rollcall() {
     try {
       const res = await apiPost('saveRollcall', {
         date,
-        attendance: attendance.map(a => ({ abbr: a.abbr, post: a.post, status: a.status, substitute: a.substitute || undefined })),
+        attendance: attendance.map(a => ({ original: a.abbr, post: a.post, status: a.status, substitute: a.substitute || undefined, type: a.type || undefined })),
         workload: {
           icuhdu: Number(workload.icuhdu) || 0,
           ortho: Number(workload.ortho) || 0,
@@ -179,8 +200,9 @@ export default function Rollcall() {
                     </td>
                     <td className="py-2 pr-2">
                       {a.status === 'sick' ? (
+                        <div className="space-y-1">
                         <select className="input" value={a.substitute} onChange={e => updateAttendance(idx, { substitute: e.target.value })} data-testid={`select-substitute-${a.abbr}`}>
-                          <option value="">請選擇 Select...</option>
+                          <option value="">請選擇接替 Select helper...</option>
                           {sickNext10.length > 0 && (
                             <optgroup label="Next-10 建議">
                               {sickNext10.map((s, i) => {
@@ -198,6 +220,8 @@ export default function Rollcall() {
                             })}
                           </optgroup>
                         </select>
+                        <p className="text-xs text-muted" data-testid={`text-sub-remark-${a.abbr}`}>原值班 Original: <b>{a.abbr}</b>{a.substitute ? <> → 接替 Helping: <b className="text-primary">{a.substitute}</b></> : ' — 待排接替 pending helper'}</p>
+                        </div>
                       ) : <span className="text-muted text-xs">—</span>}
                     </td>
                   </tr>
