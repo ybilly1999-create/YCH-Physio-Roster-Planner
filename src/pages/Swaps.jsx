@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../lib/auth';
 import { getCalendar, getStaff, apiPost } from '../lib/api';
-import { Loader2, AlertTriangle, CheckCircle2, ArrowLeftRight, Repeat, Info } from 'lucide-react';
+import { Loader2, AlertTriangle, CheckCircle2, ArrowLeftRight, Repeat, Info, Building2, Stethoscope } from 'lucide-react';
 
 function pad(n) { return String(n).padStart(2, '0'); }
 function thisYear() { return new Date().getFullYear(); }
@@ -68,6 +68,10 @@ export default function Swaps() {
 
   const weekendRows = cal.filter(r => r.type === 'Sat' || r.type === 'Sun');
   const prsRows = cal.filter(r => r.type === 'PH' || r.type === 'SH' || r.type === 'RD');
+  // OPD swap: Sat only, and must actually have an OPD person assigned.
+  const satOpdRows = cal.filter(r => r.type === 'Sat' && (r.opd !== undefined && r.opd !== null && String(r.opd).trim() !== ''));
+  // SHS replace: any date that has an SHS(1) or SHS(2) entry.
+  const shsRows = cal.filter(r => (r.shs1 && String(r.shs1).trim() !== '') || (r.shs2 && String(r.shs2).trim() !== ''));
 
   return (
     <div className="space-y-4" data-testid="page-swaps">
@@ -90,6 +94,16 @@ export default function Swaps() {
           onClick={() => setMode('replace')} data-testid="tab-mode-replace">
           <Repeat size={16} /> PH/SH/RD 替更 Replace
         </button>
+        <button
+          className={`btn ${mode === 'opd' ? 'btn-primary' : 'btn-ghost'}`}
+          onClick={() => setMode('opd')} data-testid="tab-mode-opd">
+          <Building2 size={16} /> OPD 換更（僅週六）OPD Swap
+        </button>
+        <button
+          className={`btn ${mode === 'shs' ? 'btn-primary' : 'btn-ghost'}`}
+          onClick={() => setMode('shs')} data-testid="tab-mode-shs">
+          <Stethoscope size={16} /> SHS 替更 SHS Replace
+        </button>
       </div>
 
       <div className="flex items-center gap-2">
@@ -111,6 +125,12 @@ export default function Swaps() {
       )}
       {!loading && !error && mode === 'replace' && (
         <ReplacePanel year={year} token={token} rows={prsRows} activeStaff={activeStaff} staffName={staffName} />
+      )}
+      {!loading && !error && mode === 'opd' && (
+        <OpdPanel year={year} token={token} rows={satOpdRows} staffName={staffName} />
+      )}
+      {!loading && !error && mode === 'shs' && (
+        <ShsPanel year={year} token={token} rows={shsRows} activeStaff={activeStaff} staffName={staffName} />
       )}
 
       <p className="text-xs text-muted" data-testid="text-swap-log-note">
@@ -296,6 +316,170 @@ function ReplacePanel({ year, token, rows, activeStaff, staffName }) {
         </button>
       </div>
 
+      <StatusReminder res={preview} />
+      <StatusReminder res={result} />
+    </div>
+  );
+}
+
+// ---------------- OPD swap (Sat only) — exchange the OPD staff between two Sat dates ----------------
+function OpdPanel({ year, token, rows, staffName }) {
+  const [date1, setDate1] = useState('');
+  const [date2, setDate2] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [result, setResult] = useState(null);
+
+  const row1 = rows.find(r => r.date === date1);
+  const row2 = rows.find(r => r.date === date2);
+  const canRun = date1 && date2 && date1 !== date2;
+
+  async function run(dryRun) {
+    setBusy(true);
+    if (!dryRun) setResult(null);
+    try {
+      const res = await apiPost('swapOpd', { year, date1, date2, dryRun }, token);
+      if (!res?.ok) {
+        const box = { type: 'error', text: res?.error || '操作失敗 Failed', wouldPass: false };
+        dryRun ? setPreview(box) : setResult(box);
+        return;
+      }
+      const detail = [
+        `${date1} OPD: ${staffName(res.opd1)} (${res.opd1 || '—'})`,
+        `${date2} OPD: ${staffName(res.opd2)} (${res.opd2 || '—'})`,
+        res.bothSat ? '' : '⚠ 其中一天並非週六 One date is not a Saturday.',
+      ].filter(Boolean).join('\n');
+      if (dryRun) {
+        setPreview({ type: 'info', wouldPass: res.bothSat, text: '預覽 Preview（未套用 not yet applied）', detail });
+      } else {
+        setResult({ type: 'info', wouldPass: res.bothSat, text: `已互換 OPD。OPD swap applied.`, detail });
+        setPreview(null);
+      }
+    } catch (e) {
+      const box = { type: 'error', text: e.message || '網絡錯誤', wouldPass: false };
+      dryRun ? setPreview(box) : setResult(box);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card p-4 space-y-4">
+      <p className="text-xs text-muted">OPD 只在週六更出現。選兩個週六，互換 OPD 當值同事。OPD exists only on Saturdays — pick two Saturdays to exchange the OPD staff.</p>
+      {rows.length === 0 && <p className="text-sm text-amber-700">此年份沒有已排 OPD 的週六。No Saturdays with an assigned OPD in this year.</p>}
+      <div className="grid sm:grid-cols-2 gap-4">
+        <div>
+          <label className="block text-xs text-muted mb-1">週六一 Saturday 1</label>
+          <select className="input" value={date1} onChange={e => { setDate1(e.target.value); setPreview(null); }} data-testid="select-opd-date1">
+            <option value="">請選擇 Select...</option>
+            {rows.map(r => <option key={r.date} value={r.date}>{r.date} — OPD: {r.opd}</option>)}
+          </select>
+          {row1 && <p className="text-xs text-muted mt-1">目前 OPD: {staffName(row1.opd)} ({row1.opd})</p>}
+        </div>
+        <div>
+          <label className="block text-xs text-muted mb-1">週六二 Saturday 2</label>
+          <select className="input" value={date2} onChange={e => { setDate2(e.target.value); setPreview(null); }} data-testid="select-opd-date2">
+            <option value="">請選擇 Select...</option>
+            {rows.map(r => <option key={r.date} value={r.date}>{r.date} — OPD: {r.opd}</option>)}
+          </select>
+          {row2 && <p className="text-xs text-muted mt-1">目前 OPD: {staffName(row2.opd)} ({row2.opd})</p>}
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <button className="btn btn-ghost flex-1 justify-center" onClick={() => run(true)} disabled={busy || !canRun} data-testid="button-preview-opd">
+          {busy ? <Loader2 className="animate-spin" size={16} /> : <Info size={16} />} 預覽提示 Preview
+        </button>
+        <button className="btn btn-primary flex-1 justify-center" onClick={() => run(false)} disabled={busy || !canRun} data-testid="button-submit-opd">
+          {busy ? <Loader2 className="animate-spin" size={16} /> : <Building2 size={16} />} 套用 OPD 換更 Apply
+        </button>
+      </div>
+      <StatusReminder res={preview} />
+      <StatusReminder res={result} />
+    </div>
+  );
+}
+
+// ---------------- SHS replace — replace SHS(1)/SHS(2) staff on a date that has SHS ----------------
+function ShsPanel({ year, token, rows, activeStaff, staffName }) {
+  const [date, setDate] = useState('');
+  const [slot, setSlot] = useState('1');
+  const [toAbbr, setToAbbr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [result, setResult] = useState(null);
+
+  const row = rows.find(r => r.date === date);
+  const current = row ? (slot === '2' ? row.shs2 : row.shs1) : '';
+  const canRun = date && slot && toAbbr;
+
+  async function run(dryRun) {
+    setBusy(true);
+    if (!dryRun) setResult(null);
+    try {
+      const res = await apiPost('replaceShs', { year, date, slot: Number(slot), toAbbr, dryRun }, token);
+      if (!res?.ok) {
+        const box = { type: 'error', text: res?.error || '操作失敗 Failed', wouldPass: false };
+        dryRun ? setPreview(box) : setResult(box);
+        return;
+      }
+      const detail = `${date} SHS(${slot}): ${res.before ? staffName(res.before) + ` (${res.before})` : '(空 empty)'} → ${staffName(res.after)} (${res.after || '清空 cleared'})`;
+      if (dryRun) {
+        setPreview({ type: 'info', wouldPass: true, text: '預覽 Preview（未套用 not yet applied）', detail });
+      } else {
+        setResult({ type: 'info', wouldPass: true, text: `已替更 SHS(${slot})。SHS replaced.`, detail });
+        setPreview(null);
+      }
+    } catch (e) {
+      const box = { type: 'error', text: e.message || '網絡錯誤', wouldPass: false };
+      dryRun ? setPreview(box) : setResult(box);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card p-4 space-y-4">
+      <p className="text-xs text-muted">只顯示日曆上有 SHS(1) 或 SHS(2) 的日期。直接覆寫該日的 SHS 同事。Only dates that have an SHS(1)/(2) entry are shown — directly override the SHS staff.</p>
+      {rows.length === 0 && <p className="text-sm text-amber-700">此年份沒有已排 SHS 的日期。No dates with an assigned SHS in this year.</p>}
+      <div className="grid sm:grid-cols-3 gap-4">
+        <div>
+          <label className="block text-xs text-muted mb-1">日期 Date（有 SHS）</label>
+          <select className="input" value={date} onChange={e => { setDate(e.target.value); setPreview(null); }} data-testid="select-shs-date">
+            <option value="">請選擇 Select...</option>
+            {rows.map(r => (
+              <option key={r.date} value={r.date}>
+                {r.date} ({r.type}) — {r.shs1 || '—'}{r.shs2 ? ` / ${r.shs2}` : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-muted mb-1">位置 Slot</label>
+          <select className="input" value={slot} onChange={e => { setSlot(e.target.value); setPreview(null); }} disabled={!date} data-testid="select-shs-slot">
+            <option value="1">SHS (1){row?.shs1 ? ` – ${row.shs1}` : ''}</option>
+            <option value="2">SHS (2){row?.shs2 ? ` – ${row.shs2}` : ''}</option>
+          </select>
+          {date && <p className="text-xs text-muted mt-1">目前 Current: {current ? `${staffName(current)} (${current})` : '(空 empty)'}</p>}
+        </div>
+        <div>
+          <label className="block text-xs text-muted mb-1">替更者 New SHS staff</label>
+          <select className="input" value={toAbbr} onChange={e => { setToAbbr(e.target.value); setPreview(null); }} disabled={!date} data-testid="select-shs-to">
+            <option value="">請選擇 Select...</option>
+            {activeStaff.map((s, i) => {
+              const abbr = s.Abbrev || s.abbr;
+              return <option key={i} value={abbr}>{s.Name || s.name} ({abbr})</option>;
+            })}
+          </select>
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <button className="btn btn-ghost flex-1 justify-center" onClick={() => run(true)} disabled={busy || !canRun} data-testid="button-preview-shs">
+          {busy ? <Loader2 className="animate-spin" size={16} /> : <Info size={16} />} 預覽提示 Preview
+        </button>
+        <button className="btn btn-primary flex-1 justify-center" onClick={() => run(false)} disabled={busy || !canRun} data-testid="button-submit-shs">
+          {busy ? <Loader2 className="animate-spin" size={16} /> : <Stethoscope size={16} />} 套用 SHS 替更 Apply
+        </button>
+      </div>
       <StatusReminder res={preview} />
       <StatusReminder res={result} />
     </div>

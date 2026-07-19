@@ -49,7 +49,10 @@ var TEAM = 'Team_List';
 var SHSCL = 'SHS_CL_Tracker';
 // SHS_CL_Tracker layout (1-based): LEFT block (SHS draw) B Date | C Type | D SHS Staff;
 // RIGHT block (PH/RD/SH compensated-leave) I Date | J Type | K Staff | L CL Date | M CL Deadline | N CL Status.
-var SHSCL_FIRST = 3;
+// Row 3 = section labels, Row 4 = column headers, Row 5+ = data.
+var SHSCL_FIRST = 5;
+var SHSCL_LABEL_ROW = 3;
+var SHSCL_HEADER_ROW = 4;
 var SHSCL_L = { date:2, type:3, staff:4 };
 var SHSCL_R = { date:9, type:10, staff:11, cldate:12, deadline:13, status:14 };
 // Duty_Record columns (1-based): B date C staff(orig/abbr) D post E status F substitute G type H confirmed I timestamp
@@ -166,6 +169,8 @@ function doPost(e){
         case 'requestSwap':    return _out(requestSwap(body, role));
         case 'swapWeekend':    return _out(swapWeekend(body, role));
         case 'replaceDuty':    return _out(replaceDuty(body, role));
+        case 'swapOpd':        return _out(swapOpd(body, role));
+        case 'replaceShs':     return _out(replaceShs(body, role));
         case 'forceOverride':  return _out(forceOverride(body, role));
         case 'recordBack':     return _out(recordBack(body, role));
         case 'saveRollcall':   return _out(saveRollcall(body, role));
@@ -203,7 +208,7 @@ function getMeta(){
     var m=s.getName().match(/^CAL_(\d{4})$/); if(m) years.push(Number(m[1]));
   });
   years.sort();
-  return {ok:true, name:'YCH Physio Dept Roster Management System', version:'r5b-2026-07-19', years:years,
+  return {ok:true, name:'YCH Physio Dept Roster Management System', version:'r5c-2026-07-19', years:years,
           tz:Session.getScriptTimeZone(), serverTime:_now()};
 }
 function getStaff(){
@@ -381,13 +386,21 @@ function getShsClTracker(){
   var vals=sh.getRange(SHSCL_FIRST,1,last-SHSCL_FIRST+1, SHSCL_R.status).getValues();
   function ds(v){ return (v instanceof Date)?Utilities.formatDate(v,tz,'yyyy-MM-dd'):(v?String(v):''); }
   var shs=[], cl=[];
+  // Defensive: never emit header/label echoes as data (in case the layout hasn't been re-set yet).
+  function isHeaderEcho(d, s){
+    var dd=String(d||'').trim().toLowerCase(), ss=String(s||'').trim().toLowerCase();
+    if(dd==='date' || ss==='staff' || ss==='shs staff') return true;
+    if(dd.indexOf('shs duties')>=0 || dd.indexOf('compensated leave')>=0) return true;
+    if(dd==='source:' || dd.indexOf('tracker')>=0) return true;
+    return false;
+  }
   vals.forEach(function(r){
     // LEFT: SHS draw list
     var ld=r[SHSCL_L.date-1], lstaff=r[SHSCL_L.staff-1];
-    if(ld || lstaff){ shs.push({ date:ds(ld), type:String(r[SHSCL_L.type-1]||''), staff:String(lstaff||'') }); }
+    if((ld || lstaff) && !isHeaderEcho(ld, lstaff)){ shs.push({ date:ds(ld), type:String(r[SHSCL_L.type-1]||''), staff:String(lstaff||'') }); }
     // RIGHT: compensated-leave rows — include EVERY row that has a date or staff
     var rd=r[SHSCL_R.date-1], rstaff=r[SHSCL_R.staff-1];
-    if(rd || rstaff){
+    if((rd || rstaff) && !isHeaderEcho(rd, rstaff)){
       cl.push({
         date:ds(rd), type:String(r[SHSCL_R.type-1]||''), staff:String(rstaff||''),
         clDate:ds(r[SHSCL_R.cldate-1]), deadline:ds(r[SHSCL_R.deadline-1]),
@@ -551,6 +564,53 @@ function swapWeekend(body, role){
   return {ok:true, committed:true, bothWeekend:bothWeekend,
           status1:c1.status, fail1:c1.fail, status2:c2.status, fail2:c2.fail,
           wouldPass:(String(c1.status).toUpperCase().indexOf('OK')>=0 && String(c2.status).toUpperCase().indexOf('OK')>=0)};
+}
+
+// ---------------------------------------------------------------- swapOpd (Sat-only OPD cross-date swap)
+// Sat duties have an OPD slot (CAL col K). Exchange the OPD staff between TWO Sat dates.
+// NON-BLOCKING: always commits; status advisory only.
+// body: {year, date1, date2}. (OPD is a single person per Sat, so we just swap the two.)
+function swapOpd(body, role){
+  var year=body.year, d1=body.date1, d2=body.date2;
+  if(!d1||!d2) return {ok:false, error:'need date1 and date2'};
+  var i1=_calStatusForDate(year, d1), i2=_calStatusForDate(year, d2);
+  if(!i1.row) return {ok:false, error:'date not found: '+d1};
+  if(!i2.row) return {ok:false, error:'date not found: '+d2};
+  var sh=_sh(CAL_PREFIX+year);
+  var t1=String(sh.getRange(i1.row, CC.type).getValue()||'');
+  var t2=String(sh.getRange(i2.row, CC.type).getValue()||'');
+  var bothSat=(t1==='Sat') && (t2==='Sat');
+  var o1=String(sh.getRange(i1.row, CC.opd).getValue()||'');
+  var o2=String(sh.getRange(i2.row, CC.opd).getValue()||'');
+  if(body.dryRun){
+    return {ok:true, preview:true, bothSat:bothSat, opd1:o1, opd2:o2,
+            text:o1+' \u21c4 '+o2};
+  }
+  sh.getRange(i1.row, CC.opd).setValue(o2);
+  sh.getRange(i2.row, CC.opd).setValue(o1);
+  SpreadsheetApp.flush();
+  _log('swapOpd', d1+':OPD '+o1+' <-> '+d2+':OPD '+o2, body.user||role);
+  return {ok:true, committed:true, bothSat:bothSat, opd1:o2, opd2:o1};
+}
+
+// ---------------------------------------------------------------- replaceShs (SHS(1)/SHS(2) direct replace)
+// Replace the SHS staff on a date. slot: 1 -> SHS(1) (col R), 2 -> SHS(2) (col S).
+// Only meaningful on dates that already have an SHS entry. NON-BLOCKING.
+// body: {year, date, slot(1|2), toAbbr}. toAbbr '' clears the slot.
+function replaceShs(body, role){
+  var year=body.year, dateStr=body.date, slot=Number(body.slot||1), toAbbr=(body.toAbbr||'');
+  var info=_calStatusForDate(year, dateStr);
+  if(!info.row) return {ok:false, error:'date not found'};
+  var sh=_sh(CAL_PREFIX+year);
+  var col=(slot===2)?CC.shs2:CC.shs1;
+  var before=String(sh.getRange(info.row, col).getValue()||'');
+  if(body.dryRun){
+    return {ok:true, preview:true, slot:slot, before:before, after:toAbbr};
+  }
+  sh.getRange(info.row, col).setValue(toAbbr);
+  SpreadsheetApp.flush();
+  _log('replaceShs', dateStr+' SHS('+slot+') '+(before||'(empty)')+'->'+(toAbbr||'(cleared)'), body.user||role);
+  return {ok:true, committed:true, slot:slot, before:before, after:toAbbr};
 }
 
 // ---------------------------------------------------------------- requestSwap (legacy single-date, now NON-BLOCKING)
@@ -922,22 +982,33 @@ function setupSheets(body, role){
       if(!calNames.some(function(n){return n===String(cl.getRange(1,2).getValue()).trim();})) cl.getRange(1,2).setValue(defaultCal);
       cl.getRange(1,1).setValue('Source:'); // A1 label
     }
-    // LEFT block (SHS draw) starting B3: FILTER dates+type+SHS staff where SHS1/SHS2 not blank.
-    // Skips Sat/Sun empty rows automatically because FILTER drops rows failing the condition.
+    // ---- section labels (row 3) + column headers (row 4) ----
+    cl.getRange(SHSCL_LABEL_ROW, SHSCL_L.date).setValue('SHS DUTIES (paid) \u2014 auto-listed from CALENDAR SHS (1)/(2)').setFontWeight('bold');
+    cl.getRange(SHSCL_LABEL_ROW, SHSCL_R.date).setValue('PH / RD / SH \u2014 compensated leave (CL) tracking').setFontWeight('bold');
+    cl.getRange(SHSCL_HEADER_ROW, SHSCL_L.date, 1, 3).setValues([['Date','Type','SHS Staff']]).setFontWeight('bold');
+    cl.getRange(SHSCL_HEADER_ROW, SHSCL_R.date, 1, 6).setValues([['Date','Type','Staff','CL Date','CL Deadline','CL Status']]).setFontWeight('bold');
+    // clear any stale data below headers before installing formulas
+    var clLast=cl.getLastRow();
+    if(clLast>=SHSCL_FIRST){ cl.getRange(SHSCL_FIRST,SHSCL_L.date,clLast-SHSCL_FIRST+1,SHSCL_R.staff-SHSCL_L.date+1).clearContent(); }
+
+    // LEFT block (SHS list) starting row 5: stack every SHS(1) and SHS(2) entry (skip blanks).
+    // Each SHS entry becomes its own row: Date | Type | SHS Staff.
     var srcDate='INDIRECT($B$1&"!B8:B400")';
     var srcType='INDIRECT($B$1&"!D8:D400")';
     var srcS1  ='INDIRECT($B$1&"!R8:R400")';
     var srcS2  ='INDIRECT($B$1&"!S8:S400")';
-    // SHS list: any row with an SHS(1) entry
+    // stack SHS(1) rows on top of SHS(2) rows; IFERROR each FILTER so an empty side doesn't break the stack.
     cl.getRange(SHSCL_FIRST, SHSCL_L.date).setFormula(
-      '=IFERROR(FILTER({'+srcDate+','+srcType+','+srcS1+'},('+srcS1+'<>"")),"")');
-    // RIGHT block (PH/RD/SH compensated-leave) starting I3: FILTER dates+type+staff where Type is PH/RD/SH.
+      '=IFERROR(FILTER({'+srcDate+','+srcType+','+srcS1+'},('+srcS1+'<>"")),{"","",""})');
+    // SHS(2) appended below via a second spill anchored 100 rows down (leaves room for SHS(1) spill).
+    cl.getRange(SHSCL_FIRST+100, SHSCL_L.date).setFormula(
+      '=IFERROR(FILTER({'+srcDate+','+srcType+','+srcS2+'},('+srcS2+'<>"")),"")');
+    // RIGHT block (PH/RD/SH compensated-leave) starting row 5: rows where Type is PH/RD/SH.
     var pDate='INDIRECT($B$1&"!B8:B400")';
     var pType='INDIRECT($B$1&"!D8:D400")';
-    var pStaff='INDIRECT($B$1&"!E8:E400")'; // first IPD staff as representative; full list still on CAL
     cl.getRange(SHSCL_FIRST, SHSCL_R.date).setFormula(
       '=IFERROR(FILTER({'+pDate+','+pType+'},('+pType+'="PH")+('+pType+'="RD")+('+pType+'="SH")),"")');
-    report.push('SHS_CL_Tracker FILTER formulas + year dropdown set');
+    report.push('SHS_CL_Tracker labels+headers (row 3/4) + FILTER data (row 5) + year dropdown set');
   } else report.push('SHS_CL_Tracker NOT found');
 
   // ================= 5 : CAL_Template =================
