@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../lib/auth';
-import { getMeta, apiPost } from '../lib/api';
+import { getMeta, apiPost, apiGet } from '../lib/api';
 import { CalendarPlus, Wand2, Dices, RefreshCw, Loader2, CheckCircle2, AlertTriangle } from 'lucide-react';
 
 const MONTHS = [
@@ -8,6 +8,9 @@ const MONTHS = [
   ['5', '五月 May'], ['6', '六月 Jun'], ['7', '七月 Jul'], ['8', '八月 Aug'],
   ['9', '九月 Sep'], ['10', '十月 Oct'], ['11', '十一月 Nov'], ['12', '十二月 Dec'],
 ];
+
+// Sat/Sun starting team+sub choices
+const START_TEAMS = ['A1','A2','B1','B2','C1','C2','D1','D2'];
 
 function ResultBox({ result }) {
   if (!result) return null;
@@ -33,6 +36,9 @@ export default function Generate() {
   const [rosterYear, setRosterYear] = useState(now.getFullYear());
   const [fromMonth, setFromMonth] = useState('1');
   const [toMonth, setToMonth] = useState('12');
+  const [startTeam, setStartTeam] = useState(''); // '' = auto (default A1)
+  const [startPh, setStartPh] = useState('');     // '' = auto (by PH order)
+  const [phStaff, setPhStaff] = useState([]);     // [{abbr,name}] with a PH order
   const [genRosterBusy, setGenRosterBusy] = useState(false);
   const [genRosterResult, setGenRosterResult] = useState(null);
 
@@ -48,6 +54,15 @@ export default function Generate() {
       try {
         const meta = await getMeta();
         if (meta?.ok && Array.isArray(meta.years) && meta.years.length) setYears(meta.years);
+      } catch { /* ignore */ }
+      try {
+        const st = await apiGet('getStaff');
+        const rows = (st?.rows || st?.staff || []);
+        const ph = rows
+          .filter(s => Number(s.ph_order) > 0 && (s.active === 'Y' || s.active === undefined))
+          .sort((a, b) => (Number(a.ph_order) || 999) - (Number(b.ph_order) || 999))
+          .map(s => ({ abbr: s.abbr, name: s.name, ord: Number(s.ph_order) }));
+        setPhStaff(ph);
       } catch { /* ignore */ }
     })();
   }, []);
@@ -71,7 +86,11 @@ export default function Generate() {
     setGenRosterBusy(true);
     setGenRosterResult(null);
     try {
-      const res = await apiPost('generateRoster', { year: Number(rosterYear), fromMonth: Number(fromMonth), toMonth: Number(toMonth) }, token);
+      const res = await apiPost('generateRoster', {
+        year: Number(rosterYear), fromMonth: Number(fromMonth), toMonth: Number(toMonth),
+        ...(startTeam ? { startTeam } : {}),
+        ...(startPh ? { startPh } : {}),
+      }, token);
       if (res?.ok) {
         const filled = res.filled ?? res.filledCount ?? '—';
         const needAdmin = res.needAdmin ?? res.needAdminCount ?? '—';
@@ -161,6 +180,20 @@ export default function Generate() {
             <label className="block text-xs text-muted mb-1">結束月 To</label>
             <select className="input w-36" value={toMonth} onChange={e => setToMonth(e.target.value)} data-testid="select-to-month">
               {MONTHS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-muted mb-1">首個週末由哪隊 First Sat/Sun team</label>
+            <select className="input w-40" value={startTeam} onChange={e => setStartTeam(e.target.value)} data-testid="select-start-team">
+              <option value="">自動 Auto (A1)</option>
+              {START_TEAMS.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-muted mb-1">首個 PH/RD/SH 由誰 First PH/RD/SH staff</label>
+            <select className="input w-48" value={startPh} onChange={e => setStartPh(e.target.value)} data-testid="select-start-ph">
+              <option value="">自動 Auto (按 PH order)</option>
+              {phStaff.map(s => <option key={s.abbr} value={s.abbr}>{s.abbr}{s.name ? ` – ${s.name}` : ''}</option>)}
             </select>
           </div>
           <button className="btn btn-primary" onClick={handleGenerateRoster} disabled={genRosterBusy} data-testid="button-generate-roster">

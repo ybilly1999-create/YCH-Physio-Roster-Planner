@@ -15,7 +15,8 @@
 
 // ---- Layout constants (match YCH_Physio_Roster workbook) ----
 var SM = 'Staff_Master';
-var SM_HR = 5, SM_FIRST = 6, SM_LAST = 56;
+var SM_HR = 5, SM_FIRST = 6, SM_LAST = 205; // pre-reserved 200 staff rows (was 56)
+var CAL_TEMPLATE = 'CAL_Template'; // master template sheet (formulas + conditional formatting), no data
 // Staff_Master columns (1-based)
 var C = {
   name:2, abbr:3, ort:4, neuro:5, ms:6, tier:7, mentor:8,
@@ -108,6 +109,20 @@ function _log(action, detail, who){
   sh.getRange(r, LGC.notes).setValue((action||'')+(detail?(': '+detail):''));
 }
 
+// ---------------------------------------------------------------- onOpen menu (Sheet UI)
+// Adds a ▶ YCH Roster menu so the admin can run one-time setup from the spreadsheet.
+function onOpen(){
+  try{
+    SpreadsheetApp.getUi().createMenu('▶ YCH Roster')
+      .addItem('Run setupSheets (install formulas + template)', 'menuSetupSheets')
+      .addToUi();
+  }catch(e){}
+}
+function menuSetupSheets(){
+  var res=setupSheets({user:'menu'}, 'admin');
+  try{ SpreadsheetApp.getUi().alert('setupSheets done:\n\n'+(res.report||[]).join('\n')); }catch(e){}
+}
+
 // ---------------------------------------------------------------- doGet (reads)
 function doGet(e){
   try {
@@ -153,6 +168,7 @@ function doPost(e){
         case 'deleteStaff':    return _out(deleteStaff(body, role));
         case 'setActive':      return _out(setActive(body, role));
         case 'rebuildOrders':  return _out(rebuildOrders(body, role));
+        case 'setupSheets':    return _out(setupSheets(body, role));
         case 'generateCalendar': return _out(generateCalendar(body, role));
         case 'generateRoster': return _out(generateRoster(body, role));
         case 'importHolidays': return _out(importHolidays(body, role));
@@ -181,7 +197,7 @@ function getMeta(){
     var m=s.getName().match(/^CAL_(\d{4})$/); if(m) years.push(Number(m[1]));
   });
   years.sort();
-  return {ok:true, name:'YCH Physio Dept Roster Management System', version:'r4-2026-07-18', years:years,
+  return {ok:true, name:'YCH Physio Dept Roster Management System', version:'r5-2026-07-19', years:years,
           tz:Session.getScriptTimeZone(), serverTime:_now()};
 }
 function getStaff(){
@@ -614,7 +630,8 @@ function upsertStaff(body, role){
   if(row<0){
     var col=sh.getRange(SM_FIRST,C.abbr,SM_LAST-SM_FIRST+1,1).getValues();
     for(var i=0;i<col.length;i++) if(!col[i][0] || String(col[i][0]).trim()===''){ row=SM_FIRST+i; break; }
-    if(row<0) return {ok:false, error:'staff master full (max '+(SM_LAST-SM_FIRST+1)+')'};
+    // No pre-reserved blank row left -> append a brand-new row (NO hard limit).
+    if(row<0){ row=Math.max(sh.getLastRow()+1, SM_LAST+1); }
     isNew=true;
   }
   sh.getRange(row,C.abbr).setValue(abbr);
@@ -641,10 +658,50 @@ function upsertStaff(body, role){
     sh.getRange(row,C[g+'_round']).setNumberFormat('General');
     sh.getRange(row,C[g+'_order']).setNumberFormat('General');
   });
+  // ---- Also upsert into Team_List when team/sub provided (add-staff-to-team logistic) ----
+  var teamMsg='';
+  var teamVal = (s.team!==undefined?s.team:body.team);
+  var subVal  = (s.sub !==undefined?s.sub :body.sub);
+  if(teamVal!==undefined && String(teamVal).trim()!==''){
+    teamMsg=_upsertTeamMember({abbr:abbr, name:(s.name!==undefined?s.name:body.name)||abbr,
+                               team:teamVal, sub:subVal, cat:(s.cat||body.cat||''), tier:(s.tier||body.tier||'')});
+  }
   SpreadsheetApp.flush();
-  _log('upsertStaff', abbr+(isNew?' (new)':' (edit)'), body.user||role);
+  _log('upsertStaff', abbr+(isNew?' (new)':' (edit)')+(teamMsg?(' | '+teamMsg):''), body.user||role);
   _cacheBust();
-  return {ok:true, row:row, isNew:isNew};
+  return {ok:true, row:row, isNew:isNew, team:teamMsg};
+}
+
+// Insert or update a Team_List row for a staff member.
+// sub accepts: '1','2','Sat only','Sun only','OPD'. One staff may appear in multiple
+// sub groups (e.g. core team '1' + 'OPD'); we upsert by (abbr + sub) pair.
+function _upsertTeamMember(m){
+  var sh=_sh(TEAM); if(!sh) return 'no Team_List';
+  var data=sh.getDataRange().getValues();
+  var hr=-1;
+  for(var i=0;i<data.length;i++){
+    var rw=data[i].map(function(v){return String(v).trim();});
+    if(rw.indexOf('Team')>=0 && rw.indexOf('Sub')>=0){ hr=i; break; }
+  }
+  if(hr<0) return 'no Team_List header';
+  var heads=data[hr].map(function(h){return String(h).trim();});
+  var iTeam=heads.indexOf('Team'), iSub=heads.indexOf('Sub'), iCat=heads.indexOf('Cat'),
+      iAb=heads.indexOf('Abbrev'), iNm=heads.indexOf('Name'), iTier=heads.indexOf('Tier');
+  var sub=String(m.sub||'').trim();
+  // find existing row with same abbr + same sub
+  var foundRow=-1, firstEmpty=-1;
+  for(var r=hr+1;r<data.length;r++){
+    var ab=String(data[r][iAb]||'').trim();
+    var sb=String(data[r][iSub]||'').trim();
+    if(!ab && firstEmpty<0) firstEmpty=r;
+    if(ab===m.abbr && sb===sub){ foundRow=r; break; }
+  }
+  var targetRow = foundRow>=0 ? foundRow : (firstEmpty>=0 ? firstEmpty : data.length);
+  var rowNum = targetRow+1; // 1-based
+  function setC(idx,val){ if(idx>=0 && val!==undefined && val!=='') sh.getRange(rowNum, idx+1).setValue(val); }
+  setC(iTeam, m.team); setC(iSub, sub); setC(iCat, m.cat); setC(iAb, m.abbr);
+  setC(iNm, m.name); setC(iTier, m.tier);
+  return foundRow>=0 ? ('team updated '+m.team+'/'+sub) : ('team added '+m.team+'/'+sub);
 }
 function _countStaff(){
   var sh=_sh(SM); var col=sh.getRange(SM_FIRST,C.abbr,SM_LAST-SM_FIRST+1,1).getValues();
@@ -687,6 +744,146 @@ function rebuildOrders(body, role){
   return {ok:true};
 }
 
+// ---------------------------------------------------------------- setupSheets (ONE-TIME installer)
+// Installs everything that lives IN the spreadsheet (not in code):
+//  1. Staff_Master statistic formulas (Sat/Sun/PH-RD-SH/SHS/Total/Fairness) for all rows.
+//  2. A "reference year" dropdown (K2) so the stats can point at CAL_2026 / CAL_2027 / ...
+//  3. Moves the Tier-definitions help text to the far RIGHT (frees rows for adding staff).
+//  4. SHS_CL_Tracker: a year dropdown (B1) + FILTER formulas that skip Sat/Sun blanks.
+//  5. Builds a CAL_Template sheet (headers + formulas + conditional formatting, NO data)
+//     used by generateCalendar so new years keep colours + status formulas.
+// Safe to re-run (idempotent-ish): it overwrites the same cells each time.
+function setupSheets(body, role){
+  var ss=_ss();
+  var report=[];
+
+  // ---------- helper: list existing CAL_<year> sheet names ----------
+  var calNames=[];
+  ss.getSheets().forEach(function(s){ if(/^CAL_\d{4}$/.test(s.getName())) calNames.push(s.getName()); });
+  calNames.sort();
+  var defaultCal = calNames.length ? calNames[calNames.length-1] : 'CAL_2026';
+
+  // ================= 1 + 2 + 3 : Staff_Master =================
+  var sm=_sh(SM);
+  if(sm){
+    // -- (2) reference-year dropdown in K2 (row above the header) --
+    var refCell = sm.getRange(2, 11); // K2
+    if(calNames.length){
+      var rule=SpreadsheetApp.newDataValidation().requireValueInList(calNames, true).setAllowInvalid(false).build();
+      refCell.setDataValidation(rule);
+      if(!calNames.some(function(n){return n===String(refCell.getValue()).trim();})) refCell.setValue(defaultCal);
+      sm.getRange(2,10).setValue('Ref sheet:'); // J2 label
+    }
+    var refA1 = "'"+SM+"'!$K$2"; // referenced dynamically via INDIRECT
+
+    // -- (1) statistic formulas for every data row --
+    // CAL columns: Type=D(4), IPD staff E..J(5..10), OPD=K(11), SHS1=R(18), SHS2=S(19)
+    // We COUNTIF the referenced calendar for this staff's Abbrev across the duty columns.
+    // Sat  = Type='Sat' rows where staff appears in IPD or OPD range
+    // Sun  = Type='Sun'
+    // PRS  = Type in PH/RD/SH
+    // SHS  = staff appears in SHS1/SHS2 columns (any type)
+    var first=SM_FIRST, last=SM_LAST;
+    var fSat=[], fSun=[], fPrs=[], fShs=[], fTot=[], fFair=[];
+    for(var r=first;r<=last;r++){
+      var ab='$C'+r; // Abbrev cell
+      // duty range E:K (IPD1..OPD), SHS range R:S
+      var dutyRng = 'INDIRECT($K$2&"!$E:$K")';
+      var typeRng = 'INDIRECT($K$2&"!$D:$D")';
+      var shsRng  = 'INDIRECT($K$2&"!$R:$S")';
+      // count rows where type matches AND staff appears in duty range on same row -> use SUMPRODUCT
+      var typeCol='INDIRECT($K$2&"!D8:D400")';
+      var dutyBlk='INDIRECT($K$2&"!E8:K400")';
+      var shsBlk ='INDIRECT($K$2&"!R8:S400")';
+      fSat.push('=IF('+ab+'="",,SUMPRODUCT(('+typeCol+'="Sat")*(MMULT(--('+dutyBlk+'='+ab+'),TRANSPOSE(COLUMN('+dutyBlk+')^0))>0)))');
+      fSun.push('=IF('+ab+'="",,SUMPRODUCT(('+typeCol+'="Sun")*(MMULT(--('+dutyBlk+'='+ab+'),TRANSPOSE(COLUMN('+dutyBlk+')^0))>0)))');
+      fPrs.push('=IF('+ab+'="",,SUMPRODUCT((('+typeCol+'="PH")+('+typeCol+'="RD")+('+typeCol+'="SH"))*(MMULT(--('+dutyBlk+'='+ab+'),TRANSPOSE(COLUMN('+dutyBlk+')^0))>0)))');
+      fShs.push('=IF('+ab+'="",,SUMPRODUCT(--('+shsBlk+'='+ab+')))');
+      fTot.push('=IF('+ab+'="",,Y'+r+'+Z'+r+'+AA'+r+'+AB'+r+')');
+      // fairness = total / average(total of all active) ; 1.00 = exactly average
+      fFair.push('=IF('+ab+'="",,IFERROR(AC'+r+'/AVERAGE($AC$'+first+':$AC$'+last+'),))');
+    }
+    sm.getRange(first, C.cnt_sat, fSat.length, 1).setFormulas(fSat.map(function(x){return [x];}));
+    sm.getRange(first, C.cnt_sun, fSun.length, 1).setFormulas(fSun.map(function(x){return [x];}));
+    sm.getRange(first, C.cnt_prs, fPrs.length, 1).setFormulas(fPrs.map(function(x){return [x];}));
+    sm.getRange(first, C.cnt_shs, fShs.length, 1).setFormulas(fShs.map(function(x){return [x];}));
+    sm.getRange(first, C.total,   fTot.length, 1).setFormulas(fTot.map(function(x){return [x];}));
+    sm.getRange(first, C.fair,    fFair.length,1).setFormulas(fFair.map(function(x){return [x];}));
+    sm.getRange(first, C.fair, fFair.length, 1).setNumberFormat('0.00');
+    report.push('Staff_Master stats formulas set for rows '+first+'-'+last);
+
+    // -- (3) move Tier-definitions help text to the far right (col AH=34) --
+    var helpLines=[
+      'Tier definitions:',
+      'Tier 1 = Senior therapist (can lead a shift; roster needs >=2 per shift).',
+      'Tier 2 = Independent Registered Physiotherapist (works unsupervised).',
+      'Tier 3 = New recruit (must be paired with their named Mentor on the same shift).',
+      'PH order / SHS order = numeric draw priority; blank = excluded from that auto-draw (e.g. TI).',
+      'Active = N: staff has left the department (excluded from all draws).',
+      'Leave Start / Leave End = short-term leave window (e.g. pregnancy); staff skipped on duty dates inside it.',
+      '',
+      'EW = Extreme Weather roster draw.  SK = Sick-leave roster draw.'
+    ];
+    var helpCol=34; // AH
+    sm.getRange(SM_HR+1, helpCol, helpLines.length, 1).setValues(helpLines.map(function(x){return [x];}));
+    sm.getRange(SM_HR+1, helpCol).setFontWeight('bold');
+    report.push('Tier-definitions text moved to column AH');
+  } else report.push('Staff_Master NOT found');
+
+  // ================= 4 : SHS_CL_Tracker (year dropdown + FILTER) =================
+  var cl=_sh(SHSCL);
+  if(cl){
+    // year dropdown in B1
+    if(calNames.length){
+      var clRule=SpreadsheetApp.newDataValidation().requireValueInList(calNames, true).setAllowInvalid(false).build();
+      cl.getRange(1,2).setDataValidation(clRule);
+      if(!calNames.some(function(n){return n===String(cl.getRange(1,2).getValue()).trim();})) cl.getRange(1,2).setValue(defaultCal);
+      cl.getRange(1,1).setValue('Source:'); // A1 label
+    }
+    // LEFT block (SHS draw) starting B3: FILTER dates+type+SHS staff where SHS1/SHS2 not blank.
+    // Skips Sat/Sun empty rows automatically because FILTER drops rows failing the condition.
+    var srcDate='INDIRECT($B$1&"!B8:B400")';
+    var srcType='INDIRECT($B$1&"!D8:D400")';
+    var srcS1  ='INDIRECT($B$1&"!R8:R400")';
+    var srcS2  ='INDIRECT($B$1&"!S8:S400")';
+    // SHS list: any row with an SHS(1) entry
+    cl.getRange(SHSCL_FIRST, SHSCL_L.date).setFormula(
+      '=IFERROR(FILTER({'+srcDate+','+srcType+','+srcS1+'},('+srcS1+'<>"")),"")');
+    // RIGHT block (PH/RD/SH compensated-leave) starting I3: FILTER dates+type+staff where Type is PH/RD/SH.
+    var pDate='INDIRECT($B$1&"!B8:B400")';
+    var pType='INDIRECT($B$1&"!D8:D400")';
+    var pStaff='INDIRECT($B$1&"!E8:E400")'; // first IPD staff as representative; full list still on CAL
+    cl.getRange(SHSCL_FIRST, SHSCL_R.date).setFormula(
+      '=IFERROR(FILTER({'+pDate+','+pType+'},('+pType+'="PH")+('+pType+'="RD")+('+pType+'="SH")),"")');
+    report.push('SHS_CL_Tracker FILTER formulas + year dropdown set');
+  } else report.push('SHS_CL_Tracker NOT found');
+
+  // ================= 5 : CAL_Template =================
+  var tmplName=CAL_TEMPLATE;
+  if(!_sh(tmplName)){
+    var src=_sh(defaultCal);
+    if(src){
+      var t=src.copyTo(ss).setName(tmplName);
+      // wipe all input data but keep formulas (total/status/fail) + conditional formatting
+      var lr=t.getLastRow();
+      if(lr>=CAL_FIRST){
+        var nr=lr-CAL_FIRST+1;
+        t.getRange(CAL_FIRST, CC.date, nr, CC.newcase-CC.date+1).clearContent();
+        t.getRange(CAL_FIRST, CC.shs1, nr, CC.shs2-CC.shs1+1).clearContent();
+        t.getRange(CAL_FIRST, CC.status, nr, 1).clearNote();
+      }
+      // hide the template so it isn't mistaken for a real year
+      t.hideSheet();
+      report.push('CAL_Template created from '+defaultCal+' (formulas + conditional formatting kept)');
+    } else report.push('cannot build CAL_Template: '+defaultCal+' missing');
+  } else report.push('CAL_Template already exists (kept)');
+
+  SpreadsheetApp.flush();
+  _cacheBust();
+  _log('setupSheets', report.join(' | '), (body&&body.user)||role);
+  return {ok:true, report:report};
+}
+
 // ---------------------------------------------------------------- generateCalendar (create CAL_<year> shell)
 // Read Holidays sheet into a map { 'yyyy-MM-dd' : 'PH'|'SH'|'RD' } for the given year.
 // Holidays layout: B=Date, C=Type, D=Name.
@@ -718,17 +915,28 @@ function generateCalendar(body, role){
   var year=Number(body.year); if(!year) return {ok:false,error:'need year'};
   var name=CAL_PREFIX+year;
   if(_sh(name)) return {ok:false, error:name+' already exists'};
-  var tmpl=_sh(CAL_PREFIX+ (getMeta().years[getMeta().years.length-1]||'2026'));
-  if(!tmpl) return {ok:false, error:'no template calendar'};
+  // Prefer the dedicated CAL_Template (carries formulas + conditional formatting, NO data).
+  // Fall back to the newest CAL_<year> sheet only if no template exists.
+  var usingTemplate=true;
+  var tmpl=_sh(CAL_TEMPLATE);
+  if(!tmpl){ usingTemplate=false; tmpl=_sh(CAL_PREFIX+ (getMeta().years[getMeta().years.length-1]||'2026')); }
+  if(!tmpl) return {ok:false, error:'no CAL_Template and no existing calendar to copy'};
 
-  // Duplicate the template for headers/formatting, then wipe all DATA rows.
+  // Duplicate the template (keeps formulas + conditional formatting), then wipe DATA rows.
   var copy=tmpl.copyTo(_ss()); copy.setName(name);
   var lastRow=copy.getLastRow();
   if(lastRow>=CAL_FIRST){
-    // Clear every content cell in the data grid (date..fail) so nothing carries over.
-    copy.getRange(CAL_FIRST, CC.date, lastRow-CAL_FIRST+1, CC.fail-CC.date+1).clearContent();
-    // Also clear any leftover notes on the status column.
+    // Clear only INPUT columns so staff/workload data never carries over,
+    // but KEEP the formula columns (total, status, fail) which recompute automatically.
+    // Inputs: date(2)..newcase(16) and shs1(18)..shs2(19). Skip total(17)=formula.
+    var nRows=lastRow-CAL_FIRST+1;
+    copy.getRange(CAL_FIRST, CC.date, nRows, CC.newcase-CC.date+1).clearContent(); // 2..16
+    copy.getRange(CAL_FIRST, CC.shs1, nRows, CC.shs2-CC.shs1+1).clearContent();     // 18..19
     copy.getRange(CAL_FIRST, CC.status, lastRow-CAL_FIRST+1, 1).clearNote();
+    // If copied from a real year sheet, also blank the make-up/right block leftovers.
+    if(!usingTemplate){
+      copy.getRange(CAL_FIRST, CC.status, lastRow-CAL_FIRST+1, CC.fail-CC.status+1).clearContent();
+    }
   }
 
   var tz=Session.getScriptTimeZone();
@@ -825,6 +1033,12 @@ function generateRoster(body, role){
   var phStaff=allStaff.filter(function(s){ return s.active==='Y' && (Number(s.ph_order)>0); });
   phStaff.sort(function(a,b){ return (Number(a.ph_order)||999)-(Number(b.ph_order)||999); });
   var phPool=phStaff.map(function(s){return s.abbr;}); var phPtr=0;
+  // Optional start staff for the FIRST PH/RD/SH draw.
+  if(body.startPh){
+    var sp=String(body.startPh).trim();
+    var spIdx=phPool.indexOf(sp);
+    if(spIdx>=0) phPtr=spIdx;
+  }
   // Round tracking: each staff has a current round; we only advance to the next round
   // once EVERYONE in the pool has served the current round (prevents double duty).
   var phRound={}; phPool.forEach(function(a){ phRound[a]=capMap[a]?capMap[a].ph_round:1; });
@@ -855,7 +1069,19 @@ function generateRoster(body, role){
   }
 
   // weekend rotation pointers
-  var wkIdx=0;               // index into full rotation sequence (advances per weekend DAY)
+  // ---- Optional START offsets (user chooses where the roster begins drawing) ----
+  // body.startTeam e.g. 'A1','A2','B1'..'D2' -> which team+sub takes the FIRST Sat/Sun.
+  // body.startPh e.g. staff abbr -> who takes the FIRST PH/RD/SH.
+  var startWkOffset=0;
+  if(body.startTeam){
+    var st=String(body.startTeam).trim().toUpperCase();
+    var stTeam=st.charAt(0), stSub=st.slice(1)||'1';
+    var baseSeq=rotationSeq(false); // round-0 order [A1,A2,B1,B2,...]
+    for(var qi=0; qi<baseSeq.length; qi++){
+      if(baseSeq[qi].team===stTeam && String(baseSeq[qi].sub)===stSub){ startWkOffset=qi; break; }
+    }
+  }
+  var wkIdx=startWkOffset;   // index into full rotation sequence (advances per weekend DAY)
   var filled=0, needAdmin=0, satDone=0, sunDone=0;
 
   for(var i=0;i<rows.length;i++){

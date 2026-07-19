@@ -6,6 +6,7 @@ import { Loader2, AlertTriangle, Save, Plus, CheckCircle2, ToggleLeft, ToggleRig
 function blankStaff() {
   return {
     Name: '', Abbrev: '', ORT: '-', NEURO: '-', MS: '-', Tier: '2', Mentor: '',
+    Team: '', Sub: '1',
     PHOrder: '', SHSOrder: '',
     SK_Active: 'Y', SK_Round: '0', SK_Order: '',
     TY_Active: 'Y', TY_Round: '0', TY_Order: '',
@@ -27,6 +28,8 @@ function normalizeRow(r) {
     MS: v(r.ms ?? r.MS ?? r['M&S'], '-'),
     Tier: String(v(r.tier ?? r.Tier, '2')),
     Mentor: v(r.mentor ?? r.Mentor),
+    Team: v(r.team ?? r.Team),
+    Sub: v(r.sub ?? r.Sub, '1'),
     PHOrder: v(r.ph_order ?? r.PHOrder),
     SHSOrder: v(r.shs_order ?? r.SHSOrder),
     SK_Active: v(sk.active ?? r.SK_Active, 'Y'),
@@ -92,6 +95,8 @@ export default function StaffMaster() {
       name: row.Name,
       ort: row.ORT, neuro: row.NEURO, ms: row.MS,
       tier: row.Tier, mentor: row.Mentor,
+      team: (row.Team || '').trim().toUpperCase() || undefined,
+      sub: row.Sub || undefined,
       ph_order: row.PHOrder === '' ? undefined : Number(row.PHOrder),
       shs_order: row.SHSOrder === '' ? undefined : Number(row.SHSOrder),
       active: row.Active,
@@ -198,6 +203,8 @@ export default function StaffMaster() {
                 <th className="p-2">M&S</th>
                 <th className="p-2">Tier</th>
                 <th className="p-2">Mentor</th>
+                <th className="p-2">隊 Team</th>
+                <th className="p-2">小組 Sub</th>
                 <th className="p-2">PH Order</th>
                 <th className="p-2">SHS Order</th>
                 <th className="p-2" colSpan={3}>SK (病假)</th>
@@ -209,7 +216,7 @@ export default function StaffMaster() {
                 <th className="p-2">操作 Actions</th>
               </tr>
               <tr className="text-left text-muted border-b border-border">
-                <th colSpan={9} />
+                <th colSpan={11} />
                 <th className="p-1">Active</th><th className="p-1">Round</th><th className="p-1">Order</th>
                 <th className="p-1">Active</th><th className="p-1">Round</th><th className="p-1">Order</th>
                 <th className="p-1">Active</th><th className="p-1">Round</th><th className="p-1">Order</th>
@@ -242,6 +249,21 @@ export default function StaffMaster() {
                     </select>
                   </td>
                   <td className="p-1"><input className={inputCls} value={row.Mentor} onChange={e => update(idx, { Mentor: e.target.value })} placeholder={row.Tier === '3' ? '必填 Required' : ''} data-testid={`input-mentor-${idx}`} /></td>
+                  <td className="p-1">
+                    <select className={selectCls} value={row.Team} onChange={e => update(idx, { Team: e.target.value })} data-testid={`select-team-${idx}`}>
+                      <option value="">-</option>
+                      <option value="A">A</option><option value="B">B</option><option value="C">C</option><option value="D">D</option>
+                    </select>
+                  </td>
+                  <td className="p-1">
+                    <select className={selectCls} value={row.Sub} onChange={e => update(idx, { Sub: e.target.value })} data-testid={`select-sub-${idx}`}>
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="Sat only">Sat only</option>
+                      <option value="Sun only">Sun only</option>
+                      <option value="OPD">OPD</option>
+                    </select>
+                  </td>
                   <td className="p-1"><input className={selectCls} value={row.PHOrder} onChange={e => update(idx, { PHOrder: e.target.value })} data-testid={`input-phorder-${idx}`} /></td>
                   <td className="p-1"><input className={selectCls} value={row.SHSOrder} onChange={e => update(idx, { SHSOrder: e.target.value })} data-testid={`input-shsorder-${idx}`} /></td>
 
