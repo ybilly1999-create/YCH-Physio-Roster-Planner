@@ -52,9 +52,12 @@ var SHSCL = 'SHS_CL_Tracker';
 var SHSCL_FIRST = 3;
 var SHSCL_L = { date:2, type:3, staff:4 };
 var SHSCL_R = { date:9, type:10, staff:11, cldate:12, deadline:13, status:14 };
-// Duty_Record columns (1-based): B date C post D original E status F substitute G type H confirmed I timestamp
-var DRC = { date:2, post:3, orig:4, status:5, sub:6, type:7, confirmed:8, ts:9 };
+// Duty_Record columns (1-based): B date C staff(orig/abbr) D post E status F substitute G type H confirmed I timestamp
+// NOTE: header order matches the sheet — Staff(abbr) comes BEFORE Post.
+var DRC = { date:2, orig:3, post:4, status:5, sub:6, type:7, confirmed:8, ts:9 };
 var DR_FIRST = 6;
+var DR_HR = 5; // header row
+var DR_HEADERS = ['Date','Staff','Post','Status','Substitute','Type','Confirmed','Timestamp'];
 
 // ---------------------------------------------------------------- utils
 function _ss(){ return SpreadsheetApp.getActiveSpreadsheet(); }
@@ -153,13 +156,16 @@ function doPost(e){
     var a = body.action;
     var adminOnly = {generateCalendar:1, generateRoster:1, randomizePH:1, upsertStaff:1,
                      setActive:1, rebuildOrders:1, importHolidays:1, addHoliday:1,
-                     editHoliday:1, deleteHoliday:1, forceOverride:1, approveSwap:1, rejectSwap:1};
+                     editHoliday:1, deleteHoliday:1, forceOverride:1, approveSwap:1,
+                     rejectSwap:1, setupSheets:1};
     if(adminOnly[a] && role!=='admin') return _out({ok:false, error:'admin only'});
 
     return _lock(function(){
       switch(a){
         case 'applyChange':    return _out(applyChange(body, role));
         case 'requestSwap':    return _out(requestSwap(body, role));
+        case 'swapWeekend':    return _out(swapWeekend(body, role));
+        case 'replaceDuty':    return _out(replaceDuty(body, role));
         case 'forceOverride':  return _out(forceOverride(body, role));
         case 'recordBack':     return _out(recordBack(body, role));
         case 'saveRollcall':   return _out(saveRollcall(body, role));
@@ -197,7 +203,7 @@ function getMeta(){
     var m=s.getName().match(/^CAL_(\d{4})$/); if(m) years.push(Number(m[1]));
   });
   years.sort();
-  return {ok:true, name:'YCH Physio Dept Roster Management System', version:'r5-2026-07-19', years:years,
+  return {ok:true, name:'YCH Physio Dept Roster Management System', version:'r5b-2026-07-19', years:years,
           tz:Session.getScriptTimeZone(), serverTime:_now()};
 }
 function getStaff(){
@@ -446,47 +452,123 @@ function _readIpd(year, row){
   return sh.getRange(row, CC.ipd1, 1, 6).getValues()[0].filter(function(x){return x;});
 }
 
-// ---------------------------------------------------------------- applyChange (edit IPD/PH/SH/RD/SHS with rule check)
+// ---------------------------------------------------------------- applyChange (edit IPD list of ONE date)
+// NON-BLOCKING: always commits. Rule status is returned as an ADVISORY reminder only
+// (never auto-reverts). This removes the old bug where a valid change flickered then
+// reverted to the original because the strict status formula didn't say "OK".
 function applyChange(body, role){
   var year=body.year, dateStr=body.date, names=body.ipd || [];
   var info=_calStatusForDate(year, dateStr);
   if(info.fail && !info.row) return {ok:false, error:info.fail};
-  var backup=_readIpd(year, info.row);
-  _writeIpd(year, info.row, names);
-  var chk=_calStatusForDate(year, dateStr);
-  var ok = String(chk.status).toUpperCase().indexOf('OK')>=0 || String(chk.status).toUpperCase().indexOf('PASS')>=0;
   if(body.dryRun){
-    _writeIpd(year, info.row, backup); // revert
-    return {ok:ok, status:chk.status, fail:chk.fail};
-  }
-  if(!ok && role!=='admin'){
+    // preview only: compute what the status WOULD be, then restore. Used for the reminder.
+    var backup=_readIpd(year, info.row);
+    _writeIpd(year, info.row, names);
+    var chkP=_calStatusForDate(year, dateStr);
     _writeIpd(year, info.row, backup);
-    return {ok:false, status:chk.status, fail:chk.fail, error:'rule check failed: '+chk.fail};
+    var okP = String(chkP.status).toUpperCase().indexOf('OK')>=0;
+    return {ok:true, preview:true, wouldPass:okP, status:chkP.status, fail:chkP.fail};
   }
+  _writeIpd(year, info.row, names);
+  SpreadsheetApp.flush();
+  var chk=_calStatusForDate(year, dateStr);
+  var ok = String(chk.status).toUpperCase().indexOf('OK')>=0;
   _log('applyChange', dateStr+' -> '+names.join(','), body.user||role);
-  return {ok:true, status:chk.status, fail:chk.fail, forced:(!ok && role==='admin')};
+  return {ok:true, committed:true, wouldPass:ok, status:chk.status, fail:chk.fail};
 }
 function forceOverride(body, role){ body.dryRun=false; return applyChange(body, 'admin'); }
 
-// ---------------------------------------------------------------- requestSwap (commit if valid)
+// ---------------------------------------------------------------- replaceDuty (PH/SH/RD direct override)
+// Rule 2: for PH/SH/RD the operation is a REPLACE, not a swap — directly override one
+// name on the roster of a single date. NON-BLOCKING: always commits; status advisory only.
+// body: {year, date, fromAbbr?, slot?, toAbbr}. If fromAbbr given, replace that name;
+// else if slot (0-based IPD index) given, overwrite that slot; toAbbr can be '' to clear.
+function replaceDuty(body, role){
+  var year=body.year, dateStr=body.date, fromAbbr=body.fromAbbr, toAbbr=(body.toAbbr||''), slot=body.slot;
+  var info=_calStatusForDate(year, dateStr);
+  if(!info.row) return {ok:false, error:'date not found'};
+  var names=_readIpd(year, info.row);
+  var idx=-1;
+  if(fromAbbr!==undefined && fromAbbr!==''){ idx=names.indexOf(fromAbbr); }
+  else if(slot!==undefined && slot!==null){ idx=Number(slot); }
+  if(idx<0 || idx>=6){
+    // if fromAbbr not found, append into first empty slot (up to 6)
+    if(names.length<6){ names.push(toAbbr); }
+    else return {ok:false, error:(fromAbbr||'slot')+' not found and roster full ('+dateStr+')'};
+  } else {
+    names[idx]=toAbbr;
+  }
+  // drop empties, keep order
+  names=names.filter(function(x){return x!=='';});
+  if(body.dryRun){
+    var backup=_readIpd(year, info.row);
+    _writeIpd(year, info.row, names);
+    var chkP=_calStatusForDate(year, dateStr);
+    _writeIpd(year, info.row, backup);
+    return {ok:true, preview:true, wouldPass:String(chkP.status).toUpperCase().indexOf('OK')>=0, status:chkP.status, fail:chkP.fail};
+  }
+  _writeIpd(year, info.row, names);
+  SpreadsheetApp.flush();
+  var chk=_calStatusForDate(year, dateStr);
+  _log('replace', dateStr+' '+(fromAbbr||('slot'+slot))+'->'+(toAbbr||'(cleared)'), body.user||role);
+  return {ok:true, committed:true, wouldPass:String(chk.status).toUpperCase().indexOf('OK')>=0, status:chk.status, fail:chk.fail};
+}
+
+// ---------------------------------------------------------------- swapWeekend (Sat/Sun cross-date swap)
+// Rule 1: for Sat/Sun the operation exchanges a staff member between TWO weekend dates.
+// Both dates must be Sat or Sun. NON-BLOCKING: always commits; status advisory only.
+// body: {year, date1, abbr1, date2, abbr2}. abbr1 (on date1) <-> abbr2 (on date2).
+function swapWeekend(body, role){
+  var year=body.year, d1=body.date1, a1=body.abbr1, d2=body.date2, a2=body.abbr2;
+  if(!d1||!d2||!a1||!a2) return {ok:false, error:'need date1, abbr1, date2, abbr2'};
+  var i1=_calStatusForDate(year, d1); var i2=_calStatusForDate(year, d2);
+  if(!i1.row) return {ok:false, error:'date not found: '+d1};
+  if(!i2.row) return {ok:false, error:'date not found: '+d2};
+  var sh=_sh(CAL_PREFIX+year);
+  // advisory: check both are Sat/Sun (do NOT block — just flag in reminder)
+  var t1=String(sh.getRange(i1.row, CC.type).getValue()||'');
+  var t2=String(sh.getRange(i2.row, CC.type).getValue()||'');
+  var bothWeekend=(t1==='Sat'||t1==='Sun') && (t2==='Sat'||t2==='Sun');
+  var n1=_readIpd(year, i1.row), n2=_readIpd(year, i2.row);
+  var x1=n1.indexOf(a1), x2=n2.indexOf(a2);
+  if(x1<0) return {ok:false, error:a1+' not on duty '+d1};
+  if(x2<0) return {ok:false, error:a2+' not on duty '+d2};
+  if(body.dryRun){
+    var b1=n1.slice(), b2=n2.slice();
+    n1[x1]=a2; n2[x2]=a1;
+    _writeIpd(year, i1.row, n1); _writeIpd(year, i2.row, n2);
+    var p1=_calStatusForDate(year, d1), p2=_calStatusForDate(year, d2);
+    _writeIpd(year, i1.row, b1); _writeIpd(year, i2.row, b2);
+    return {ok:true, preview:true, bothWeekend:bothWeekend,
+            status1:p1.status, fail1:p1.fail, status2:p2.status, fail2:p2.fail,
+            wouldPass:(String(p1.status).toUpperCase().indexOf('OK')>=0 && String(p2.status).toUpperCase().indexOf('OK')>=0)};
+  }
+  n1[x1]=a2; n2[x2]=a1;
+  _writeIpd(year, i1.row, n1); _writeIpd(year, i2.row, n2);
+  SpreadsheetApp.flush();
+  var c1=_calStatusForDate(year, d1), c2=_calStatusForDate(year, d2);
+  _log('swapWeekend', d1+':'+a1+' <-> '+d2+':'+a2, body.user||role);
+  return {ok:true, committed:true, bothWeekend:bothWeekend,
+          status1:c1.status, fail1:c1.fail, status2:c2.status, fail2:c2.fail,
+          wouldPass:(String(c1.status).toUpperCase().indexOf('OK')>=0 && String(c2.status).toUpperCase().indexOf('OK')>=0)};
+}
+
+// ---------------------------------------------------------------- requestSwap (legacy single-date, now NON-BLOCKING)
+// Kept for backward compatibility. Old behaviour reverted on rule fail (the reported bug).
+// Now it commits the substitution and returns status as an advisory reminder only.
 function requestSwap(body, role){
   var year=body.year, dateStr=body.date, fromAbbr=body.fromAbbr, toAbbr=body.toAbbr;
   var info=_calStatusForDate(year, dateStr);
   if(!info.row) return {ok:false, error:'date not found'};
-  // weekend-only rule for staff
-  var wk=_sh(CAL_PREFIX+year).getRange(info.row, CC.weekday).getValue();
-  var typ=_sh(CAL_PREFIX+year).getRange(info.row, CC.type).getValue();
   var names=_readIpd(year, info.row);
   var idx=names.indexOf(fromAbbr);
   if(idx<0) return {ok:false, error:fromAbbr+' not on duty '+dateStr};
-  var backup=names.slice();
   names[idx]=toAbbr;
   _writeIpd(year, info.row, names);
+  SpreadsheetApp.flush();
   var chk=_calStatusForDate(year, dateStr);
-  var ok = String(chk.status).toUpperCase().indexOf('OK')>=0;
-  if(!ok){ _writeIpd(year, info.row, backup); return {ok:false, status:chk.status, fail:chk.fail, error:'swap breaks rule: '+chk.fail}; }
   _log('swap', dateStr+' '+fromAbbr+'->'+toAbbr, body.user||role);
-  return {ok:true, status:chk.status};
+  return {ok:true, committed:true, wouldPass:String(chk.status).toUpperCase().indexOf('OK')>=0, status:chk.status, fail:chk.fail};
 }
 
 // ---------------------------------------------------------------- recordBack (make-up: bump round)
@@ -877,6 +959,16 @@ function setupSheets(body, role){
       report.push('CAL_Template created from '+defaultCal+' (formulas + conditional formatting kept)');
     } else report.push('cannot build CAL_Template: '+defaultCal+' missing');
   } else report.push('CAL_Template already exists (kept)');
+
+  // ================= 6 : Duty_Record header alignment =================
+  // Ensures the header row exactly matches the 8-column backend layout so the
+  // "Confirmed" flag and Timestamp land under the right labels (fixes the
+  // shifted-column bug where 'Y' sat under 'Timestamp' and the time spilled right).
+  var drs=_sh(DR);
+  if(drs){
+    drs.getRange(DR_HR, DRC.date, 1, DR_HEADERS.length).setValues([DR_HEADERS]).setFontWeight('bold');
+    report.push('Duty_Record header realigned to: '+DR_HEADERS.join(' | '));
+  } else report.push('Duty_Record NOT found');
 
   SpreadsheetApp.flush();
   _cacheBust();
